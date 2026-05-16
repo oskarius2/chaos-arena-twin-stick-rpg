@@ -1,12 +1,51 @@
-import React, { useRef, useEffect, useState } from 'react';
+﻿import React, { useRef, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Flame, Play, RotateCcw, Shield, Swords, Zap, Trophy, Target, Sparkles } from 'lucide-react';
+import { Flame, Play, RotateCcw, Shield, Swords, Zap, Trophy, Target } from 'lucide-react';
 import { Joystick } from './game/controls/Joystick';
 import { GameHUD } from './game/controls/GameHUD';
 import { GearSystem } from './game/controls/GearSystem';
+import { BuffCardPicker } from './game/controls/BuffCardPicker';
+import { ArtifactUnlockPicker } from './game/controls/ArtifactUnlockPicker';
+import { ArtifactInventory } from './game/controls/ArtifactInventory';
+import { detectMobileViewport } from './game/controls/mobileLayout';
+import { computeThreatLevel } from './game/balance/threat';
+import { playSfx, loadSfxMuted, setSfxMuted, setSfxVolume, getSfxVolume, resumeAudio } from './game/audio/sfx';
+import { startMusic, stopMusic, duckMusic, loadMusicSettings, setMusicMuted, setMusicVolume, getMusicMuted } from './game/audio/music';
+import { computeBeam, createBeamFlash } from './game/combat/beam';
+import { applyBeamHit } from './game/combat/beamHit';
+import { spawnDamageNumber } from './game/juice/damageNumbers';
+import { triggerHitFeedback, shootSfxForSlot, isBossHit } from './game/juice/hitFeedback';
+import { getActiveSynergies } from './game/buffs/synergies';
+import { SynergyBar } from './game/controls/SynergyBar';
+import { RunSummary } from './game/controls/RunSummary';
+import { PASSIVE_BUFFS } from './game/content/buffs';
+import { BuffRarity } from './game/types';
 import { Vector2 } from './game/utils/vector';
-import { Artifact, ArtifactSlot, PassiveBuff, EntityType, GameState, ItemType, EnemyType, Entity, BuffRarity } from './game/types';
-import { INITIAL_STATE, spawnEnemy, updateProjectiles, updateEnemies, checkCollision, createExplosion, createImpact, updateParticles, spawnItem, createItemSparkle, resolveObstacleCollision, checkProjectileObstacleCollision, generateObstaclesForStage, getRandomBuffs, PASSIVE_BUFFS, ARTIFACTS } from './game/Logic';
+import { Artifact, ArtifactSlot, PassiveBuff, EntityType, GameState, ItemType, EnemyType, Entity } from './game/types';
+import {
+  INITIAL_STATE,
+  spawnEnemy,
+  updateProjectiles,
+  updateEnemies,
+  checkCollision,
+  createExplosion,
+  createImpact,
+  updateParticles,
+  spawnItem,
+  createItemSparkle,
+  createImplosion,
+  spawnXpOrb,
+  resolveObstacleCollision,
+  checkProjectileObstacleCollision,
+  generateObstaclesForStage,
+  appendObstaclesForExpansion,
+  pickBuffs,
+  ARTIFACTS,
+  getCardIntervalSeconds,
+} from './game/Logic';
+import { applyBuff, hasPermanentOverdrive, hasPermanentPiercing, hasPermanentRapidFire } from './game/buffs/applyBuff';
+import { applyHangarLoadout } from './game/runSetup';
+import { pickArtifactUnlockChoices } from './game/meta/artifactUnlock';
 import { render } from './game/Renderer';
 
 export default function App() {
@@ -15,9 +54,9 @@ export default function App() {
   const [uiState, setUiState] = useState<{
     health: number;
     maxHealth: number;
-    exp: number;
-    nextLevelExp: number;
-    level: number;
+    survivalTime: number;
+    threatLevel: number;
+    threatPeak: number;
     score: number;
     wave: number;
     stage: number;
@@ -65,8 +104,11 @@ export default function App() {
     };
   });
 
-  const [newArtifactPopup, setNewArtifactPopup] = useState<Artifact | null>(null);
+  const [artifactUnlockChoices, setArtifactUnlockChoices] = useState<Artifact[]>([]);
+  const [showArtifactUnlock, setShowArtifactUnlock] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [isInventoryOpen, setIsInventoryOpen] = useState(false);
+  const [newUnlockIds, setNewUnlockIds] = useState<string[]>([]);
 
   useEffect(() => {
     localStorage.setItem('unlockedArtifacts', JSON.stringify(unlockedArtifactIds));
@@ -93,46 +135,44 @@ export default function App() {
   const lastAiUpdate = useRef(0);
 
   useEffect(() => {
+    loadSfxMuted();
+    loadMusicSettings();
+    setSfxMutedState(localStorage.getItem('sfxMuted') === '1');
+    setMusicMutedState(localStorage.getItem('musicMuted') === '1');
+    setSfxVol(getSfxVolume());
     const handleResize = () => {
       setDimensions({ width: window.innerWidth, height: window.innerHeight });
-      setIsMobile(window.innerWidth < 768 || ('ontouchstart' in window));
+      setIsMobile(detectMobileViewport());
     };
     handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
+  const openBuffPicker = (state: GameState) => {
+    state.isPaused = true;
+    setCurrentBuffs(pickBuffs(state, 3));
+    setShowLevelUp(true);
+    playSfx('cardFlip');
+    duckMusic(0.3);
+  };
+
   const startGame = () => {
     const initialState = INITIAL_STATE(dimensions.width, dimensions.height);
-    
-    // Apply Artifact Stats: Shared ones (Armor/Mobility) are permanent.
-    // Weapons (Cannon A/B) are applied dynamically in the logic.
-    const slots = Object.keys(equippedArtifactIds) as ArtifactSlot[];
-    slots.forEach(slot => {
-      const artId = equippedArtifactIds[slot];
-      if (artId && ARTIFACTS[artId]) {
-        const art = ARTIFACTS[artId];
-        initialState.equippedArtifacts[slot] = artId;
-        
-        // Permanent shared stats
-        if (slot === 'ARMOR' && art.stats.healthMod) {
-          initialState.player.maxHealth += art.stats.healthMod;
-        }
-        if (slot === 'MOBILITY') {
-          if (art.stats.speedMod) initialState.player.speed *= art.stats.speedMod;
-          if (art.stats.energyMod) initialState.maxEnergy += art.stats.energyMod;
-        }
-        
-        // Global bonuses that might come from weapons but apply to everything
-        if (art.stats.critMod) initialState.critChance += art.stats.critMod;
-      }
-    });
-    
-    initialState.player.health = initialState.player.maxHealth;
+    applyHangarLoadout(initialState, equippedArtifactIds);
+    initialState.threatLevel = computeThreatLevel(initialState);
+    initialState.threatPeak = initialState.threatLevel;
+    initialState.runStartTime = Date.now();
+    initialState.runArtifactsUnlockedThisRun = [];
     gameStateRef.current = initialState;
+    setNewUnlockIds([]);
+    setShowArtifactUnlock(false);
+    setArtifactUnlockChoices([]);
     syncUi();
     setScreen('GAME');
     setIsPauseMenuOpen(false);
+    resumeAudio();
+    if (!musicMuted) startMusic();
   };
 
   const startAimTrainer = () => {
@@ -165,9 +205,9 @@ export default function App() {
     setUiState({
       health: state.player.health,
       maxHealth: state.player.maxHealth,
-      exp: state.experience,
-      nextLevelExp: state.nextLevelExp,
-      level: state.level,
+      survivalTime: state.survivalTime,
+      threatLevel: state.threatLevel,
+      threatPeak: state.threatPeak,
       score: state.score,
       wave: state.wave,
       stage: state.stage,
@@ -193,7 +233,7 @@ export default function App() {
         getTacticalCommentary({
           score: state.score,
           health: Math.floor((state.player.health / state.player.maxHealth) * 100),
-          equips: (Object.values(equippedArtifactIds).filter(id => !!id) as string[]).map(id => ARTIFACTS[id]?.name || "Standard"),
+          equips: (Object.values(state.equippedArtifacts).filter(id => !!id) as string[]).map(id => ARTIFACTS[id]?.name || "Standard"),
           enemiesDefeated: Math.floor(state.score / 100)
         }).then(msg => {
           if (msg) {
@@ -208,38 +248,33 @@ export default function App() {
   const handleLevelUpChoice = (choiceId: string) => {
     const next = gameStateRef.current;
     if (!next) return;
-    
-    next.passives.push(choiceId);
-
-    // Apply specific logic for each choice
-    switch (choiceId) {
-      case 'dmg_up': next.baseDamage *= 1.25; break;
-      case 'crit_up': next.critChance += 0.15; break;
-      case 'health_up': 
-        next.player.maxHealth += 60; 
-        next.player.health = Math.min(next.player.maxHealth, next.player.health + 150); 
-        break;
-      case 'speed_up': next.player.speed *= 1.2; break;
-      case 'energy_up': next.maxEnergy += 50; next.energy = next.maxEnergy; break;
-      case 'magnet_up': next.magnetRange *= 2.5; break;
-      case 'regen_up': next.regen += 4; break;
-      case 'bounce_up': next.bounceCount += 1; break;
-      case 'lifesteal_up': next.lifeSteal += 0.1; break;
-      case 'shield_up': next.shieldTimer = 1; break; 
-      case 'explosive': next.explosiveChance += 0.2; break;
-      case 'multishot_up': next.multiShot += 4; break;
-      case 'overdrive_p': next.buffs.overdrive += 999999; break; // Permanent stack roughly
-      case 'time_slow_p': next.buffs.timeSlow += 999999; break;
-      case 'orbital': next.orbitalCount += 1; break;
-      case 'lighting': break;
-      case 'rapid_fire_p': next.buffs.rapidFire += 999999; break; // Permanent
-      case 'pierce_up': next.buffs.piercing += 999999; break; 
-      case 'gravity_well': break; // Logic in collision
-    }
-
+    applyBuff(next, choiceId);
+    const def = PASSIVE_BUFFS[choiceId];
+    if (def?.exclusive || def?.rarity === BuffRarity.EXCLUSIVE) playSfx('exclusive');
+    else playSfx('augment');
     setShowLevelUp(false);
     next.isPaused = false;
     controls.current.isFiring = false;
+    duckMusic(1);
+    syncUi();
+  };
+
+  const handleArtifactUnlockChoice = (artifactId: string) => {
+    if (!unlockedArtifactIds.includes(artifactId)) {
+      setUnlockedArtifactIds((prev) => [...prev, artifactId]);
+      setNewUnlockIds((prev) => [...prev, artifactId]);
+    }
+    const next = gameStateRef.current;
+    if (next) {
+      next.runArtifactUnlocks += 1;
+      if (!next.runArtifactsUnlockedThisRun.includes(artifactId)) {
+        next.runArtifactsUnlockedThisRun.push(artifactId);
+      }
+      next.isPaused = false;
+      playSfx('artifact');
+    }
+    setShowArtifactUnlock(false);
+    setArtifactUnlockChoices([]);
     syncUi();
   };
 
@@ -249,8 +284,14 @@ export default function App() {
     next.isPaused = !next.isPaused;
     if (next.isPaused) controls.current.isFiring = false;
     setIsPauseMenuOpen(next.isPaused);
+    duckMusic(next.isPaused ? 0.3 : 1);
     syncUi();
   };
+
+  useEffect(() => {
+    const duck = showLevelUp || showArtifactUnlock || isPauseMenuOpen;
+    duckMusic(duck ? 0.3 : 1);
+  }, [showLevelUp, showArtifactUnlock, isPauseMenuOpen]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -314,7 +355,7 @@ export default function App() {
       // dt is normalized to 60fps (16.67ms per frame)
       const dt = Math.min(deltaTime / 16.67, 4); 
 
-      if (!next || next.isPaused || showLevelUp) {
+      if (!next || next.isPaused || showLevelUp || showArtifactUnlock) {
         if (next) render(ctx, next, dimensions.width, dimensions.height);
         animId = requestAnimationFrame(loop);
         return;
@@ -373,27 +414,68 @@ export default function App() {
         next.energy = Math.min(next.maxEnergy, next.energy + 0.3 * dt);
       }
 
+      if (next.gameMode === 'NORMAL' && !next.isPaused) {
+        next.survivalTime += dt * (16.67 / 1000);
+        next.threatLevel = computeThreatLevel(next);
+        next.threatPeak = Math.max(next.threatPeak, next.threatLevel);
+      }
+
+      if (next.pickJuiceTimer > 0) next.pickJuiceTimer -= dt;
+
+      if (next.hasVoidRift) {
+        next.voidRiftCooldown -= dt * (16.67 / 1000);
+        if (next.voidRiftCooldown <= 0) {
+          next.voidRiftCooldown = 720;
+          const pulseR = 220;
+          next.enemies.forEach((e) => {
+            if (e.pos.distanceTo(player.pos) < pulseR) {
+              const pull = player.pos.sub(e.pos).normalize().mul(35);
+              e.pos = e.pos.add(pull);
+              e.health -= 25 + next.threatLevel * 0.3;
+              e.hitTimer = 5;
+            }
+          });
+          next.particles.push(...createExplosion(player.pos, '#22d3ee', 25, 1.5));
+          next.screenFlash = Math.max(next.screenFlash, 8);
+        }
+      }
+
       // Card Timer Logic
       next.cardTimer -= dt * (16.67 / 1000); // Decr in seconds
       if (next.cardTimer <= 0) {
-        next.cardTimer = 60; // Reset to 60s
-        next.level += 1;
-        next.isPaused = true;
-        setCurrentBuffs(getRandomBuffs(4));
-        setShowLevelUp(true);
+        next.cardTimer = getCardIntervalSeconds(next.stage);
+        openBuffPicker(next);
         next.particles.push(...createExplosion(player.pos, '#60a5fa', 80));
         next.screenshake = 25;
         syncUi();
       }
 
-      // Buffs decay
+      if (next.dashIFrameTimer > 0) next.dashIFrameTimer -= dt;
+
+      if (next.hasTimeDilation) {
+        next.timeDilationCooldown -= dt * (16.67 / 1000);
+        if (next.timeDilationCooldown <= 0) {
+          next.buffs.timeSlow = Math.max(next.buffs.timeSlow, 360);
+          next.timeDilationCooldown = 2400;
+        }
+      }
+
+      if (next.hasEmergencyShield && player.health / player.maxHealth < 0.3) {
+        next.emergencyShieldCooldown -= dt * (16.67 / 1000);
+        if (next.emergencyShieldCooldown <= 0) {
+          next.buffs.shield = Math.max(next.buffs.shield, 240);
+          next.emergencyShieldCooldown = 2700;
+        }
+      }
+
+      // Buffs decay (skip permanents)
       if (next.buffs.shield > 0) next.buffs.shield -= dt;
-      if (next.buffs.overdrive > 0) next.buffs.overdrive -= dt;
+      if (!next.permanentOverdrive && next.buffs.overdrive > 0) next.buffs.overdrive -= dt;
       if (next.buffs.magnet > 0) next.buffs.magnet -= dt;
       if (next.buffs.scoreX > 0) next.buffs.scoreX -= dt;
-      if (next.buffs.rapidFire > 0) next.buffs.rapidFire -= dt;
-      if (next.buffs.timeSlow > 0) next.buffs.timeSlow -= dt;
-      if (next.buffs.piercing > 0) next.buffs.piercing -= dt;
+      if (!next.permanentRapidFire && next.buffs.rapidFire > 0) next.buffs.rapidFire -= dt;
+      if (!next.permanentTimeSlow && next.buffs.timeSlow > 0) next.buffs.timeSlow -= dt;
+      if (!next.permanentPiercing && next.buffs.piercing > 0) next.buffs.piercing -= dt;
       
       if (next.comboTimer > 0) {
         next.comboTimer -= dt * (16.67 / 1000);
@@ -467,10 +549,12 @@ export default function App() {
       }
       
       // Dash Initiation
-      if (controls.current.wantDash && next.energy >= 30 && !next.isDashing) {
+      const dashCost = Math.max(12, 30 - next.dashEnergyDiscount);
+      if (controls.current.wantDash && next.energy >= dashCost && !next.isDashing) {
         next.isDashing = true;
         next.dashDuration = 10;
-        next.energy -= 30;
+        next.energy -= dashCost;
+        if (next.dashIFrames) next.dashIFrameTimer = 18;
         controls.current.wantDash = false;
         
         // Fix: Better direction capturing
@@ -516,13 +600,15 @@ export default function App() {
       player.pos.y = Math.max(player.radius, Math.min(next.world.height - player.radius, player.pos.y));
       
       const fireIntervalBase = 150; // Super rapid fire base
-      let fireInterval = (next.buffs.overdrive > 0 ? fireIntervalBase * 0.4 : fireIntervalBase);
+      let fireInterval = hasPermanentOverdrive(next) ? fireIntervalBase * 0.4 : fireIntervalBase;
+      if (next.buffs.overdrive > 0 && !next.permanentOverdrive) fireInterval *= 0.4;
       
       // Weapon-specific fire rates
       if (next.activeWeaponSlot === 'CANNON_B') fireInterval *= 2.5; // Rockets are slower
       if (next.activeWeaponSlot === 'CANNON_C') fireInterval = 4000; // Railgun/Laser is very slow (4s cooldown)
       
-      if (next.buffs.rapidFire > 0) fireInterval *= 0.4; // Rapid fire buff
+      if (hasPermanentRapidFire(next) || next.buffs.rapidFire > 0) fireInterval *= 0.4;
+      if (next.bulletStormMult > 1) fireInterval /= next.bulletStormMult;
       
       if (controls.current.isFiring && currentTime - lastFireTime.current > fireInterval) {
         lastFireTime.current = currentTime;
@@ -530,7 +616,7 @@ export default function App() {
         let numProjectiles = next.multiShot || 1;
         const spread = Math.min(Math.PI / 4, 0.1 * numProjectiles); // Dynamic spread
         
-        const totalCritChance = (next.critChance || 0.15);
+          const totalCritChance = (next.critChance || 0.15) + next.pendingCritBonus;
 
         // Weapon damage modifier
         let weaponDmgMod = 1;
@@ -545,6 +631,7 @@ export default function App() {
         let pRadius = 5;
         let pColor = '#fef08a';
         let pPiercing = next.bounceCount;
+        if (hasPermanentPiercing(next) || next.hasInfinityPierce) pPiercing += 1000;
 
         if (next.activeWeaponSlot === 'CANNON_B') {
           projectileSpeed = 7;
@@ -553,21 +640,29 @@ export default function App() {
           // Rockets are inherently more powerful per shot
           weaponDmgMod *= 2.0; 
         } else if (next.activeWeaponSlot === 'CANNON_C') {
-          projectileSpeed = 60; // Extremely fast
-          pRadius = 35; // Thick beam
-          pColor = '#00f2ff'; // Cyan Laser
-          pPiercing += 1000; // Total piercing
-          numProjectiles = 1; 
-          weaponDmgMod *= 20.0; // Massive damage
+          pColor = '#00f2ff';
+          numProjectiles = 1;
+          weaponDmgMod *= 3.5;
           next.screenshake = 10;
         }
 
         // Tesla Procs - Optimized (no dt in Math.random for consistency)
-        if (next.passives.includes('lighting') && Math.random() < 0.05) {
+        if ((next.hasLighting || next.passives.includes('lighting') || next.passives.includes('chain_god')) && Math.random() < 0.08) {
           const nearest = next.enemies[Math.floor(Math.random() * next.enemies.length)];
           if (nearest && nearest.pos.distanceTo(player.pos) < 400) {
             nearest.health -= 50;
             next.particles.push(...createImpact(nearest.pos, '#60a5fa', 5));
+            if (next.passives.includes('chain_god')) {
+              let chains = 0;
+              for (const other of next.enemies) {
+                if (chains >= 2) break;
+                if (other.id !== nearest.id && other.health > 0 && other.pos.distanceTo(nearest.pos) < 180) {
+                  other.health -= 40;
+                  next.particles.push(...createImpact(other.pos, '#38bdf8', 4));
+                  chains++;
+                }
+              }
+            }
           }
         }
 
@@ -636,6 +731,26 @@ export default function App() {
           next.particles.push(...createExplosion(muzzlePos, pColor, 2));
           next.screenshake = Math.min(next.screenshake + 1, 5);
         }
+
+        if (next.hasBackshot) {
+          const backAngle = Math.atan2(-aimDir.y, -aimDir.x);
+          const bvx = Math.cos(backAngle) * projectileSpeed;
+          const bvy = Math.sin(backAngle) * projectileSpeed;
+          next.projectiles.push({
+            id: Math.random().toString(),
+            type: EntityType.PROJECTILE,
+            pos: player.pos.clone(),
+            radius: pRadius * 0.8,
+            health: 1,
+            maxHealth: 1,
+            speed: projectileSpeed,
+            velocity: new Vector2(bvx, bvy),
+            color: pColor,
+            ownerId: 'player',
+            damage: Math.floor(next.baseDamage * 0.7),
+            bounceCount: pPiercing,
+          });
+        }
       }
 
       // Orbitals Logic
@@ -670,27 +785,26 @@ export default function App() {
           if (next.stageTransition <= 0) {
             // Advance Stage
           next.stage++;
-          if (next.stage > 25) {
-            next.isGameOver = true;
-            next.particles.push(...createExplosion(next.player.pos, '#34d399', 100, 3));
-            next.screenshake = 20;
-            return;
-          }
+          next.cardTimer = getCardIntervalSeconds(next.stage);
           next.enemiesToKill = 150 + 100 * next.stage;
           next.bossActive = false;
           next.enemies = [];
           next.projectiles = [];
           next.items = [];
-          // Substantial world expansion
-          next.world.width += 1500;
-          next.world.height += 1500;
-          next.player.pos.x = next.world.width / 2;
-          next.player.pos.y = next.world.height / 2;
-          next.camera.x = next.world.width / 2 - dimensions.width / 2;
-          next.camera.y = next.world.height / 2 - dimensions.height / 2;
-          next.obstacles = generateObstaclesForStage(next.stage, next.world.width, next.world.height);
-          next.player.health = next.player.maxHealth; // Full heal on stage change
-          next.screenFlash = 20; // Big flash
+          const expand = 3200;
+          const prevW = next.world.width;
+          const prevH = next.world.height;
+          next.world.width += expand;
+          next.world.height += expand;
+          const newObs = appendObstaclesForExpansion(next.stage, prevW, prevH, expand, expand, player.pos);
+          next.obstacles = [...next.obstacles, ...newObs];
+          next.player.health = Math.min(
+            next.player.maxHealth,
+            player.health + next.player.maxHealth * 0.3
+          );
+          next.screenFlash = 20;
+          openBuffPicker(next);
+          playSfx('augment');
         }
       }
       }
@@ -717,6 +831,9 @@ export default function App() {
         
         if (!next.bossActive && next.enemiesToKill > next.enemies.length && next.enemies.length < maxEnemies && Math.random() < spawnChance) {
           next.enemies.push(spawnEnemy(next));
+          if (next.threatLevel >= 70 && Math.random() < 0.1) {
+            for (let h = 0; h < 3; h++) next.enemies.push(spawnEnemy(next, 9));
+          }
         } else if (next.bossActive && next.enemies.filter(e => e.enemyType === EnemyType.BOSS).length === 0) {
           // Spawn the boss
           next.enemies.push(spawnEnemy(next));
@@ -793,8 +910,17 @@ export default function App() {
               for (let j = cellEnemies.length - 1; j >= 0; j--) {
                 const e = cellEnemies[j];
                 if (checkCollision(p, e)) {
-                  const damage = (p.damage || 10) * (Math.random() < (next.critChance || 0) ? 2 : 1);
-                  const isCrit = damage > (p.damage || 10) * 1.5;
+                  let critRoll = (next.critChance || 0) + next.pendingCritBonus;
+                  const isCrit = Math.random() < critRoll;
+                  next.pendingCritBonus = isCrit ? Math.min(0.35, next.chainCritBonus) : 0;
+                  let damage = (p.damage || 10) * (isCrit ? 2.5 : 1);
+                  if (e.damageResist && e.damageResist > 0) damage *= 1 - e.damageResist;
+                  if (e.health < e.maxHealth * 0.5 && next.hunterMarkBonus > 0) {
+                    damage *= 1 + next.hunterMarkBonus;
+                  }
+                  if (next.frostSlowStrength > 0) {
+                    e.frostTimer = Math.max(e.frostTimer || 0, 45 * next.frostSlowStrength);
+                  }
                   
                   e.health -= damage;
                   e.hitTimer = 3; 
@@ -851,7 +977,7 @@ export default function App() {
                     }
                   }
                   
-                  if ((p.bounceCount || 0) > 0 && p.health > 0 && !isCrit && next.buffs.piercing <= 0) {
+                  if ((p.bounceCount || 0) > 0 && p.health > 0 && !isCrit && !hasPermanentPiercing(next) && !next.hasInfinityPierce && next.buffs.piercing <= 0) {
                     // Ricochet logic: find another nearby enemy
                     const bounceRadius = 300;
                     let nearestOther: Entity | null = null;
@@ -875,9 +1001,9 @@ export default function App() {
                     } else {
                       p.health = 0;
                     }
-                  } else if (!isCrit && next.buffs.piercing <= 0) {
+                  } else if (!isCrit && !hasPermanentPiercing(next) && !next.hasInfinityPierce && next.buffs.piercing <= 0) {
                     p.health = 0;
-                  } else if (next.buffs.piercing > 0) {
+                  } else if (hasPermanentPiercing(next) || next.hasInfinityPierce || next.buffs.piercing > 0) {
                     p.damage = (p.damage || 10) * 0.8;
                     if ((p.damage || 0) < 5) p.health = 0;
                   } else if (isCrit) {
@@ -922,9 +1048,42 @@ export default function App() {
                   if (e.health <= 0) {
                     next.combo++;
                     next.comboTimer = 1.5;
-                    const scoreGain = 100 * (next.buffs.scoreX > 0 ? 2 : 1) * Math.min(10, next.combo);
+                    const scoreGain = 100 * (next.buffs.scoreX > 0 ? 2 : 1) * Math.min(10, next.combo) * next.comboDamageMult;
                     next.score += scoreGain;
-                    next.experience += 25;
+                    next.killCountSinceHeal += 1;
+                    if (next.passives.includes('kill_satellite')) {
+                      next.killSatelliteCounter += 1;
+                      if (next.killSatelliteCounter >= 8) {
+                        next.killSatelliteCounter = 0;
+                        const pulseDmg = 30 + next.threatLevel * 0.5;
+                        next.enemies.forEach((oe) => {
+                          if (oe.health > 0) oe.health -= pulseDmg;
+                        });
+                        next.particles.push(...createExplosion(player.pos, '#f472b6', 40, 2));
+                        next.screenshake = Math.min(next.screenshake + 12, 25);
+                      }
+                    }
+                    if (next.vampiricBurstStacks > 0 && next.killCountSinceHeal >= 20) {
+                      next.killCountSinceHeal = 0;
+                      player.health = Math.min(player.maxHealth, player.health + player.maxHealth * 0.25 * next.vampiricBurstStacks);
+                    }
+                    if (next.volatileDeath) {
+                      next.particles.push(...createExplosion(e.pos, e.color, 15, 1.2));
+                      const vgx = Math.floor(e.pos.x / 150);
+                      const vgy = Math.floor(e.pos.y / 150);
+                      for (let ox = -1; ox <= 1; ox++) {
+                        for (let oy = -1; oy <= 1; oy++) {
+                          const cell = grid.get(`${vgx + ox},${vgy + oy}`);
+                          if (cell) {
+                            cell.forEach((other) => {
+                              if (other !== e && other.pos.distanceTo(e.pos) < 90) {
+                                other.health -= 40;
+                              }
+                            });
+                          }
+                        }
+                      }
+                    }
                     
                     // Throttle death explosions
                     const explCount = e.enemyType === EnemyType.BOSS ? 100 : (20 / chaosFactor);
@@ -979,21 +1138,16 @@ export default function App() {
                         next.screenshake = 40;
                         next.screenFlash = 25; 
                         
-                        // Bosses mainly drop Artifacts now as they are the evolution points
-                        const dropCount = 3 + next.stage;
-                        for (let d = 0; d < dropCount; d++) {
-                          const itm = spawnItem(e.pos);
-                          if (itm) {
-                            next.items.push({
-                              ...itm, 
-                              itemType: ItemType.ARTIFACT,
-                              color: '#f0abfc',
-                              pos: new Vector2(e.pos.x + (Math.random()-0.5)*300, e.pos.y + (Math.random()-0.5)*300)
-                            });
+                        if (next.runArtifactUnlocks < 2) {
+                          const choices = pickArtifactUnlockChoices(unlockedArtifactIds, 2);
+                          if (choices.length > 0) {
+                            setArtifactUnlockChoices(choices);
+                            setShowArtifactUnlock(true);
+                            next.isPaused = true;
                           }
                         }
-                        
-                        // And some health/energy
+
+                        // Health / energy drops
                         const basicDrops = [ItemType.HEALTH, ItemType.ENERGY, ItemType.BOMB];
                         basicDrops.forEach(dt => {
                           const itm = spawnItem(e.pos);
@@ -1039,23 +1193,7 @@ export default function App() {
         }
 
         if (checkCollision(player, item)) {
-          if (item.itemType === ItemType.ARTIFACT) {
-            const allArtifacts = Object.values(ARTIFACTS);
-            const randomArt = allArtifacts[Math.floor(Math.random() * allArtifacts.length)];
-            
-            setEquippedArtifactIds(prev => ({
-              ...prev,
-              [randomArt.slot]: randomArt.id
-            }));
-
-            if (!unlockedArtifactIds.includes(randomArt.id)) {
-              setUnlockedArtifactIds(prev => [...prev, randomArt.id]);
-            }
-            
-            setNewArtifactPopup(randomArt);
-            next.hitStop = 30;
-            next.screenFlash = 1.0;
-          } else if (item.itemType === ItemType.HEALTH) {
+          if (item.itemType === ItemType.HEALTH) {
             player.health = Math.min(player.maxHealth, player.health + 100);
           } else if (item.itemType === ItemType.ENERGY) {
             next.energy = next.maxEnergy;
@@ -1082,6 +1220,10 @@ export default function App() {
 
       for (const e of next.enemies) {
         if (checkCollision(player, e)) {
+          if (next.thornsDamage > 0) {
+            e.health -= next.thornsDamage * 0.15 * dt;
+          }
+          if (next.dashIFrameTimer > 0) continue;
           if (next.buffs.shield <= 0) {
             player.health -= 0.6 * dt;
             player.hitTimer = 3;
@@ -1103,20 +1245,8 @@ export default function App() {
 
       if (next.screenshake > 0) next.screenshake *= Math.pow(0.9, dt);
 
-      if (next.experience >= next.nextLevelExp) {
-        next.level += 1;
-        next.experience = 0;
-        next.nextLevelExp = Math.floor(next.nextLevelExp * 1.6 + 2000); 
-        next.isPaused = true;
-        
-        // Generate random buffs (4 cards)
-        setCurrentBuffs(getRandomBuffs(4));
-        
-        setShowLevelUp(true);
-        next.particles.push(...createExplosion(player.pos, '#60a5fa', 80));
-        next.particles.push(...createExplosion(player.pos, '#ffffff', 40));
-        next.screenshake = 25;
-        syncUi();
+      if (player.health / player.maxHealth < 0.25 && Math.random() < 0.002) {
+        playSfx('lowHp');
       }
 
       if (next.score > next.wave * 4000) {
@@ -1135,7 +1265,7 @@ export default function App() {
 
     animId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animId);
-  }, [screen, dimensions, showLevelUp, equippedArtifactIds]);
+  }, [screen, dimensions, showLevelUp, showArtifactUnlock, equippedArtifactIds]);
 
   return (
     <div className={`fixed inset-0 bg-[#0c0c0e] overflow-hidden select-none touch-none ${screen === 'GAME' ? 'cursor-crosshair' : 'cursor-default'}`}>
@@ -1168,8 +1298,11 @@ export default function App() {
               <button onClick={startAimTrainer} className="bg-amber-600 hover:bg-amber-500 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-3 shadow-[0_0_30px_rgba(217,119,6,0.4)] transition-all duration-300 hover:scale-105 active:scale-95">
                 <Target size={24} fill="currentColor" /> AIM TRAINER
               </button>
-              <button onClick={() => setIsGearOpen(true)} className="bg-white/5 hover:bg-white/10 border border-white/10 text-white font-bold py-4 rounded-2xl flex items-center justify-center gap-3 transition-colors hover:border-white/30 backdrop-blur-md">
+              <button onClick={() => setIsGearOpen(true)} className="bg-white/5 hover:bg-white/10 border border-white/10 text-white font-bold py-4 min-h-14 rounded-2xl flex items-center justify-center gap-3 transition-colors hover:border-white/30 backdrop-blur-md">
                 <Swords size={20} className="opacity-70" /> CONFIGURE LOADOUT
+              </button>
+              <button onClick={() => setIsInventoryOpen(true)} className="bg-fuchsia-600/20 hover:bg-fuchsia-600/30 border border-fuchsia-500/30 text-white font-bold py-4 min-h-14 rounded-2xl flex items-center justify-center gap-3 transition-colors">
+                RELIC VAULT ({unlockedArtifactIds.length})
               </button>
 
               <div className="grid grid-cols-2 gap-2 mt-2">
@@ -1235,8 +1368,9 @@ export default function App() {
         <motion.div key="game-ui-overlay" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="absolute inset-0 pointer-events-none">
           <GameHUD 
             health={uiState.health} maxHealth={uiState.maxHealth}
-            exp={uiState.exp} nextLevelExp={uiState.nextLevelExp}
-            level={uiState.level} score={uiState.score} wave={uiState.wave}
+            survivalTime={uiState.survivalTime}
+            threatLevel={uiState.threatLevel}
+            score={uiState.score} wave={uiState.wave}
             energy={uiState.energy} maxEnergy={uiState.maxEnergy}
             stage={uiState.stage} enemiesToKill={uiState.enemiesToKill} stageTransition={uiState.stageTransition} gameMode={uiState.gameMode}
             showLevelUp={showLevelUp} onChoiceSelection={handleLevelUpChoice}
@@ -1301,7 +1435,7 @@ export default function App() {
           </div>
 
           <div className="absolute bottom-6 left-6 md:bottom-10 md:left-10 flex flex-col items-center gap-4">
-            <Joystick size={isMobile ? 80 : 128} label="move" onMove={(dir) => { controls.current.move = dir; }} onEnd={() => { controls.current.move = { x: 0, y: 0 }; }} />
+            <Joystick size={isMobile ? 92 : 128} label="move" onMove={(dir) => { controls.current.move = dir; }} onEnd={() => { controls.current.move = { x: 0, y: 0 }; }} />
           </div>
           <div className="absolute bottom-6 right-6 md:bottom-10 md:right-10 flex flex-col items-center gap-4">
             <div className="relative mb-2">
@@ -1323,38 +1457,42 @@ export default function App() {
                 <Zap size={32} fill={uiState && uiState.energy >= 30 ? "white" : "rgba(255,255,255,0.2)"} />
               </motion.button>
             </div>
-            <Joystick size={isMobile ? 80 : 128} label="aim" color="bg-red-500/10" onMove={(dir) => { controls.current.aim = dir; controls.current.isFiring = true; }} onEnd={() => { controls.current.isFiring = false; }} />
+            <Joystick size={isMobile ? 92 : 128} label="aim" color="bg-red-500/10" onMove={(dir) => { controls.current.aim = dir; controls.current.isFiring = true; }} onEnd={() => { controls.current.isFiring = false; }} />
           </div>
         </motion.div>
       )}
 
-      <AnimatePresence>
-        {newArtifactPopup && (
-          <motion.div 
-            initial={{ opacity: 0, scale: 0.8, y: 50 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.8, y: -50 }}
-            className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 backdrop-blur-sm pointer-events-auto"
-          >
-            <div className="bg-slate-900 border-2 border-fuchsia-500 p-8 rounded-[3rem] shadow-[0_0_100px_rgba(232,121,249,0.3)] flex flex-col items-center gap-4 text-center max-w-sm">
-               <div className="w-20 h-20 bg-fuchsia-500/20 rounded-3xl flex items-center justify-center text-fuchsia-400 mb-2">
-                 <Sparkles size={48} />
-               </div>
-               <h3 className="text-3xl font-black text-white italic uppercase tracking-tighter">Artifact Found!</h3>
-               <p className="text-fuchsia-400 font-bold uppercase tracking-widest text-sm">{newArtifactPopup.name}</p>
-               <p className="text-white/60 text-xs mt-2">{newArtifactPopup.description}</p>
-               <button 
-                onClick={() => setNewArtifactPopup(null)}
-                className="mt-6 w-full py-4 bg-white text-black font-black uppercase italic rounded-2xl hover:bg-fuchsia-400 transition-colors"
-               >
-                 Acknowledge
-               </button>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
-      <GearSystem 
+      <BuffCardPicker
+        show={showLevelUp && screen === 'GAME'}
+        buffs={currentBuffs}
+        passives={gameStateRef.current?.passives ?? []}
+        onSelect={handleLevelUpChoice}
+        isMobile={isMobile}
+      />
+
+      <ArtifactUnlockPicker
+        show={showArtifactUnlock && screen === 'GAME'}
+        choices={artifactUnlockChoices}
+        unlocksRemaining={2 - (gameStateRef.current?.runArtifactUnlocks ?? 0)}
+        onSelect={handleArtifactUnlockChoice}
+        isMobile={isMobile}
+      />
+
+      <ArtifactInventory
+        isOpen={isInventoryOpen}
+        onClose={() => setIsInventoryOpen(false)}
+        unlockedIds={unlockedArtifactIds}
+        newUnlockIds={newUnlockIds}
+        isMobile={isMobile}
+        onOpenHangar={() => {
+          setIsInventoryOpen(false);
+          setIsGearOpen(true);
+        }}
+      />
+
+      <GearSystem
+        isMobile={isMobile} 
         isOpen={isGearOpen}
         onClose={() => setIsGearOpen(false)}
         unlockedArtifacts={unlockedArtifactIds.map(id => ARTIFACTS[id]).filter(Boolean)}
@@ -1408,21 +1546,39 @@ export default function App() {
             key="game-over-screen"
             initial={{ opacity: 0 }} 
             animate={{ opacity: 1 }} 
-            className={`absolute inset-0 z-[100] ${uiState.stage > 25 ? 'bg-indigo-950/90' : 'bg-red-950/90'} backdrop-blur-xl flex flex-col items-center justify-center p-8`}
+            className="absolute inset-0 z-[100] bg-red-950/90 backdrop-blur-xl flex flex-col items-center justify-center p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]"
           >
-            <h2 className="text-6xl md:text-8xl font-black text-white italic tracking-tighter uppercase mb-8">
-              {uiState.stage > 25 ? 'VICTORY' : 'DEFEATED'}
-            </h2>
+            <h2 className="text-5xl md:text-8xl font-black text-white italic tracking-tighter uppercase mb-6">DEFEATED</h2>
             <div className="bg-black/40 border border-white/10 p-8 rounded-3xl text-center mb-8 min-w-[300px]">
               <div className="text-5xl font-black text-white mb-2">{uiState.score.toLocaleString()}</div>
               <div className="text-white/40 text-xs uppercase font-bold tracking-widest mb-4">Final Score</div>
-              <div className="text-2xl font-black text-white mb-2">Stage {Math.min(uiState.stage, 25)}</div>
-            </div>
+              <div className="grid grid-cols-2 gap-3 text-left text-sm mt-4">
+                <div className="bg-white/5 p-3 rounded-xl">
+                  <div className="text-white/40 text-[10px] uppercase font-bold">Survived</div>
+                  <div className="text-white font-mono font-bold">
+                    {Math.floor((gameStateRef.current?.survivalTime ?? 0) / 60)}:
+                    {String(Math.floor((gameStateRef.current?.survivalTime ?? 0) % 60)).padStart(2, '0')}
+                  </div>
+                </div>
+                <div className="bg-white/5 p-3 rounded-xl">
+                  <div className="text-white/40 text-[10px] uppercase font-bold">Peak Heat</div>
+                  <div className="text-rose-400 font-black">{gameStateRef.current?.threatPeak ?? 0}%</div>
+                </div>
+                <div className="bg-white/5 p-3 rounded-xl">
+                  <div className="text-white/40 text-[10px] uppercase font-bold">Sector</div>
+                  <div className="text-amber-400 font-black">{uiState.stage}</div>
+                </div>
+                <div className="bg-white/5 p-3 rounded-xl">
+                  <div className="text-white/40 text-[10px] uppercase font-bold">Augments</div>
+                  <div className="text-cyan-400 font-black">{gameStateRef.current?.augmentCount ?? 0}</div>
+                </div>
+              </div>
+            </motion.div>
             <button onClick={() => { 
                 gameStateRef.current = null;
                 startGame();
-              }} className="bg-white hover:bg-gray-200 transition-colors text-black font-black py-4 px-12 rounded-2xl flex items-center justify-center gap-3 pointer-events-auto">
-              <RotateCcw size={24} /> {uiState.stage > 25 ? 'PLAY AGAIN' : 'RESTART'}
+              }} className="min-h-14 bg-white hover:bg-gray-200 transition-colors text-black font-black py-4 px-12 rounded-2xl flex items-center justify-center gap-3 pointer-events-auto">
+              <RotateCcw size={24} /> RESTART RUN
             </button>
           </motion.div>
         )}

@@ -3,12 +3,17 @@ import { motion, AnimatePresence } from 'motion/react';
 import { Heart, Shield, Sword, Zap, Activity, HeartPulse, ShieldCheck, Bomb, Swords, CircleIcon, MoveRight, Target, Flame, Magnet, Menu, RotateCcw } from 'lucide-react';
 import { PassiveBuff, BuffRarity } from '../types';
 
+function formatSurvival(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s.toString().padStart(2, '0')}`;
+}
+
 interface HUDProps {
   health: number;
   maxHealth: number;
-  exp: number;
-  nextLevelExp: number;
-  level: number;
+  survivalTime?: number;
+  threatLevel?: number;
   score: number;
   wave: number;
   energy: number;
@@ -49,16 +54,35 @@ const RARITY_STYLE: Record<BuffRarity, { border: string, bg: string, glow: strin
   [BuffRarity.RARE]: { border: 'border-blue-500/40', bg: 'bg-blue-500/10', glow: 'shadow-blue-500/20', text: 'text-blue-400' },
   [BuffRarity.EPIC]: { border: 'border-purple-500/50', bg: 'bg-purple-500/15', glow: 'shadow-purple-500/30', text: 'text-purple-400' },
   [BuffRarity.LEGENDARY]: { border: 'border-amber-400/60', bg: 'bg-amber-400/20', glow: 'shadow-amber-400/50', text: 'text-amber-400' },
+  [BuffRarity.EXCLUSIVE]: { border: 'border-cyan-400/60', bg: 'bg-cyan-500/10', glow: 'shadow-cyan-500/40', text: 'text-cyan-300' },
 };
 
-export const GameHUD: React.FC<HUDProps> = ({ 
-  health, maxHealth, exp, nextLevelExp, level, score, wave, energy, maxEnergy,
-  stage = 1, enemiesToKill = 0, stageTransition = 0, gameMode = 'NORMAL', onChoiceSelection, showLevelUp, onOpenMenu, onWeaponSwitch, randomBuffs = [],
-  cardTimer = 60, activeWeaponSlot = 'CANNON_A', equippedArtifacts = {}, isMobile = false
+export const GameHUD: React.FC<HUDProps> = ({
+  health,
+  maxHealth,
+  survivalTime = 0,
+  threatLevel = 0,
+  score,
+  wave,
+  energy,
+  maxEnergy,
+  stage = 1,
+  enemiesToKill = 0,
+  stageTransition = 0,
+  gameMode = 'NORMAL',
+  onChoiceSelection,
+  showLevelUp,
+  onOpenMenu,
+  onWeaponSwitch,
+  randomBuffs = [],
+  cardTimer = 60,
+  activeWeaponSlot = 'CANNON_A',
+  equippedArtifacts = {},
+  isMobile = false,
 }) => {
   const healthPercent = (health / maxHealth) * 100;
-  const expPercent = (exp / nextLevelExp) * 100;
   const energyPercent = (energy / maxEnergy) * 100;
+  const threatPercent = Math.min(100, threatLevel);
 
   return (
     <div className="absolute inset-0 pointer-events-none flex flex-col p-6 font-sans">
@@ -68,17 +92,15 @@ export const GameHUD: React.FC<HUDProps> = ({
         <div className="flex flex-col gap-2 w-64 relative z-10">
           <div className="w-full h-2 bg-black/40 rounded-full overflow-hidden border border-white/10">
             <motion.div 
-              className="h-full bg-blue-400 shadow-[0_0_10px_rgba(96,165,250,0.5)]"
+              className="h-full bg-linear-to-r from-rose-600 to-orange-400"
               initial={{ width: 0 }}
-              animate={{ width: `${expPercent}%` }}
+              animate={{ width: `${threatPercent}%` }}
             />
           </div>
           <div className="flex items-center gap-3 text-white font-bold tracking-tight">
-            <span className="bg-blue-600 px-2 py-0.5 rounded text-xs text-nowrap">LVL {level}</span>
-            <div className="flex flex-col items-start leading-none">
-               <span className="text-[8px] text-blue-400 font-black uppercase tracking-tighter mb-0.5">Next Card</span>
-               <span className="text-xs font-mono tabular-nums leading-none">{Math.max(0, Math.ceil(cardTimer))}s</span>
-            </div>
+            <span className="bg-rose-600/80 px-2 py-0.5 rounded text-[10px] font-black uppercase">HEAT {threatLevel}%</span>
+            <span className="text-[10px] font-mono text-cyan-400 tabular-nums">{formatSurvival(survivalTime)}</span>
+            <span className="text-[10px] font-mono text-blue-400 tabular-nums">{Math.max(0, Math.ceil(cardTimer))}s</span>
             <button 
               onClick={(e) => { e.stopPropagation(); onOpenMenu?.(); }} 
               className="pointer-events-auto bg-white/5 hover:bg-white/10 p-1.5 rounded-lg border border-white/10 transition-colors"
@@ -99,7 +121,7 @@ export const GameHUD: React.FC<HUDProps> = ({
             <div className="text-sm font-black text-amber-500 uppercase drop-shadow tracking-widest">AIM TRAINER</div>
           ) : (
             <>
-              <div className="text-sm font-black text-amber-400 uppercase drop-shadow">STAGE {stage}</div>
+              <motion.div className="text-sm font-black text-amber-400 uppercase drop-shadow">SECTOR {stage}</motion.div>
               {stageTransition > 0 ? (
                 <span className="text-xs uppercase text-green-400 animate-pulse bg-green-900/40 px-2 py-1 rounded">Stage Clear</span>
               ) : enemiesToKill > 0 ? (
@@ -193,9 +215,8 @@ export const GameHUD: React.FC<HUDProps> = ({
         </div>
       </div>
 
-      {/* Level Up Overlay */}
-      <AnimatePresence>
-        {showLevelUp && (
+      {/* Buff picker rendered in App.tsx (BuffCardPicker) */}
+      {false && showLevelUp && (
           <motion.div 
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -263,7 +284,6 @@ export const GameHUD: React.FC<HUDProps> = ({
             </div>
           </motion.div>
         )}
-      </AnimatePresence>
     </div>
   );
 };

@@ -1,5 +1,51 @@
-import { GameState, Entity, EntityType, Particle, ItemType, EnemyType, Obstacle, BuffRarity, PassiveBuff, Artifact } from './types';
+import { GameState, Entity, EntityType, Particle, ItemType, EnemyType, Obstacle } from './types';
 import { Vector2 } from './utils/vector';
+import { hasTimeSlowEffect } from './buffs/applyBuff';
+import {
+  computeEnemyVelocity,
+  runEnemyAttacks,
+  getSeparationForce,
+  finalizeEnemyMovement,
+} from './ai/enemyBehaviors';
+import { pickEnemyTypeForThreat } from './balance/threat';
+
+export { ARTIFACTS, artifactPowerScore } from './content/artifacts';
+export { PASSIVE_BUFFS } from './content/buffs';
+export { pickBuffs } from './buffs/pickBuffs';
+export { getCardIntervalSeconds, getNextLevelExp } from './buffs/cardTiming';
+export { computeThreatLevel, getThreatMult, pickEnemyTypeForThreat } from './balance/threat';
+
+export function appendObstaclesForExpansion(
+  stage: number,
+  worldWidth: number,
+  worldHeight: number,
+  expandW: number,
+  expandH: number,
+  playerPos: Vector2
+): Obstacle[] {
+  const obs: Obstacle[] = [];
+  const count = 3 + Math.floor(stage * 0.5);
+  for (let i = 0; i < count; i++) {
+    const isCircle = Math.random() > 0.5;
+    const sizeBase = 50 + Math.random() * 120;
+    let pos = new Vector2(
+      playerPos.x + (Math.random() - 0.5) * (worldWidth + expandW),
+      playerPos.y + (Math.random() - 0.5) * (worldHeight + expandH)
+    );
+    pos.x = Math.max(80, Math.min(worldWidth + expandW - 80, pos.x));
+    pos.y = Math.max(80, Math.min(worldHeight + expandH - 80, pos.y));
+    if (pos.sub(playerPos).magnitude() < 200) continue;
+    obs.push({
+      id: Math.random().toString(),
+      type: isCircle ? 'CIRCLE' : 'RECT',
+      pos,
+      size: isCircle ? new Vector2(sizeBase, 0) : new Vector2(sizeBase, sizeBase * (0.5 + Math.random())),
+      rotation: isCircle ? Math.random() * Math.PI : 0,
+      color: `hsl(${(stage * 25 + i * 17) % 360}, 30%, 15%)`,
+    });
+  }
+  return obs;
+}
 
 export function generateObstaclesForStage(stage: number, width: number, height: number): Obstacle[] {
   const obs: Obstacle[] = [];
@@ -28,9 +74,14 @@ export function generateObstaclesForStage(stage: number, width: number, height: 
   return obs;
 }
 
+export function getInitialWorldSize(viewWidth: number, viewHeight: number): { width: number; height: number } {
+  const base = Math.min(viewWidth, viewHeight);
+  const mult = 20;
+  return { width: base * mult, height: base * mult };
+}
+
 export const INITIAL_STATE = (width: number, height: number): GameState => {
-  const worldWidth = width * 10;
-  const worldHeight = height * 10;
+  const { width: worldWidth, height: worldHeight } = getInitialWorldSize(width, height);
   return {
     player: {
       id: 'player',
@@ -51,7 +102,7 @@ export const INITIAL_STATE = (width: number, height: number): GameState => {
     score: 0,
     level: 1,
     experience: 0,
-    nextLevelExp: 500,
+    nextLevelExp: 650,
     isGameOver: false,
     isPaused: false,
     wave: 1,
@@ -102,59 +153,52 @@ export const INITIAL_STATE = (width: number, height: number): GameState => {
       MOBILITY: null
     },
     activeWeaponSlot: 'CANNON_A',
-    cardTimer: 60
+    cardTimer: 75,
+    permanentOverdrive: false,
+    permanentTimeSlow: false,
+    permanentRapidFire: false,
+    permanentPiercing: false,
+    hasLighting: false,
+    hasGravityWell: false,
+    hasBackshot: false,
+    hasSpiralShot: false,
+    burnOnCrit: false,
+    frostSlowStrength: 0,
+    thornsDamage: 0,
+    dashIFrames: false,
+    dashIFrameTimer: 0,
+    comboDamageMult: 1,
+    hasEmergencyShield: false,
+    emergencyShieldCooldown: 0,
+    smartRicochet: false,
+    vampiricBurstStacks: 0,
+    killCountSinceHeal: 0,
+    chainCritBonus: 0,
+    pendingCritBonus: 0,
+    wideArcStacks: 0,
+    dashEnergyDiscount: 0,
+    volatileDeath: false,
+    hasTimeDilation: false,
+    timeDilationCooldown: 0,
+    hunterMarkBonus: 0,
+    runArtifactUnlocks: 0,
+    survivalTime: 0,
+    threatLevel: 0,
+    threatPeak: 0,
+    augmentCount: 0,
+    augmentPityExclusive: 0,
+    runStartTime: Date.now(),
+    bulletStormMult: 1,
+    hasVoidRift: false,
+    voidRiftCooldown: 0,
+    killSatelliteCounter: 0,
+    hasInfinityPierce: false,
+    runArtifactsUnlockedThisRun: [],
+    pickJuiceTimer: 0,
+    beamFlashes: [],
+    nextShotBurns: false,
   };
 };
-
-export const PASSIVE_BUFFS: Record<string, PassiveBuff> = {
-  'dmg_up': { id: 'dmg_up', name: 'Kinetic Overload', description: 'Overcharge systems to increase base bullet damage by 25%', rarity: BuffRarity.COMMON, icon: 'Zap' },
-  'crit_up': { id: 'crit_up', name: 'Precision Optics', description: 'Enhance targeting sensors to increase critical strike chance by 15%', rarity: BuffRarity.COMMON, icon: 'Target' },
-  'health_up': { id: 'health_up', name: 'Composite Hull', description: 'Reinforce ship structure with composite plating (+60 Max HP)', rarity: BuffRarity.COMMON, icon: 'Shield' },
-  'speed_up': { id: 'speed_up', name: 'Afterburners', description: 'Improve engine efficiency for constant 20% increase in mobility', rarity: BuffRarity.COMMON, icon: 'Flame' },
-  'energy_up': { id: 'energy_up', name: 'Flux Capacitor', description: 'Install high-capacity energy cells for larger dash reserves', rarity: BuffRarity.COMMON, icon: 'Zap' },
-  'magnet_up': { id: 'magnet_up', name: 'Singularity Field', description: 'Generate a local gravity well that pulls items from huge distances', rarity: BuffRarity.RARE, icon: 'Magnet' },
-  'regen_up': { id: 'regen_up', name: 'Nano-Bot Swarm', description: 'Deploy repair drones that constantly mend hull integrity (4HP/s)', rarity: BuffRarity.RARE, icon: 'Activity' },
-  'bounce_up': { id: 'bounce_up', name: 'Kinetic Rebound', description: 'Experimental ammo coating allows projectiles to bounce off obstacles', rarity: BuffRarity.RARE, icon: 'RotateCcw' },
-  'lifesteal_up': { id: 'lifesteal_up', name: 'Soul Siphon', description: 'Harvest residual energy from destroyed enemies to recover health', rarity: BuffRarity.EPIC, icon: 'HeartPulse' },
-  'shield_up': { id: 'shield_up', name: 'Aegis Protocol', description: 'Advanced emergency shielding that regenerates every 15 seconds', rarity: BuffRarity.EPIC, icon: 'ShieldCheck' },
-  'explosive': { id: 'explosive', name: 'Volatile Rounds', description: 'Bullets have a chance to trigger massive area-of-effect explosions', rarity: BuffRarity.EPIC, icon: 'Bomb' },
-  'multishot_up': { id: 'multishot_up', name: 'Split-Fire Array', description: 'Calibrate cannons to fire additional projectiles in each burst', rarity: BuffRarity.EPIC, icon: 'Swords' },
-  'overdrive_p': { id: 'overdrive_p', name: 'Core Overclock', description: 'Permanently boost internal clock speeds for higher attack frequency', rarity: BuffRarity.EPIC, icon: 'Zap' },
-  'time_slow_p': { id: 'time_slow_p', name: 'Chrono Disruption', description: 'Radiate a field that slows all surrounding enemy movement significantly', rarity: BuffRarity.EPIC, icon: 'RotateCcw' },
-  'orbital': { id: 'orbital', name: 'Sentinel Drone', description: 'Deploy an automated combat drone that orbits and shreds nearby targets', rarity: BuffRarity.LEGENDARY, icon: 'CircleIcon' },
-  'lighting': { id: 'lighting', name: 'Arc Discharger', description: 'Projectiles release high-voltage arcs that chain between enemies', rarity: BuffRarity.LEGENDARY, icon: 'Zap' },
-  'rapid_fire_p': { id: 'rapid_fire_p', name: 'Hyper-Trigger', description: 'Unlock total fire rate potential, effectively doubling rate of fire', rarity: BuffRarity.LEGENDARY, icon: 'Flame' },
-  'pierce_up': { id: 'pierce_up', name: 'Plasma Shredders', description: 'Ammunition becomes intangible, passing through all targets in its path', rarity: BuffRarity.LEGENDARY, icon: 'MoveRight' },
-  'gravity_well': { id: 'gravity_well', name: 'Event Horizon', description: 'Bullets create micro-singularities that pull enemies into the line of fire', rarity: BuffRarity.LEGENDARY, icon: 'Zap' },
-};
-
-export function getRandomBuffs(count: number): PassiveBuff[] {
-  const all = Object.values(PASSIVE_BUFFS);
-  const selected: PassiveBuff[] = [];
-  const pool = [...all];
-  
-  for (let i = 0; i < count; i++) {
-    if (pool.length === 0) break;
-    // Rarity weighting: Legendary (3%), Epic (10%), Rare (25%), Common (62%)
-    const rand = Math.random();
-    let rarityTarget = BuffRarity.COMMON;
-    if (rand < 0.03) rarityTarget = BuffRarity.LEGENDARY;
-    else if (rand < 0.13) rarityTarget = BuffRarity.EPIC;
-    else if (rand < 0.38) rarityTarget = BuffRarity.RARE;
-
-    let options = pool.filter(b => b.rarity === rarityTarget);
-    if (options.length === 0) {
-      // Fallback: search for closest available rarity
-      options = pool;
-    }
-    
-    const idx = Math.floor(Math.random() * options.length);
-    const buff = options[idx];
-    selected.push(buff);
-    pool.splice(pool.findIndex(b => b.id === buff.id), 1);
-  }
-  return selected;
-}
 
 export function createExplosion(pos: Vector2, color: string, count: number = 10, speedMult: number = 1): Particle[] {
   const particles: Particle[] = [];
@@ -217,6 +261,52 @@ export function createExplosion(pos: Vector2, color: string, count: number = 10,
   });
 
   return particles;
+}
+
+export function createImplosion(pos: Vector2, color: string, count: number = 12): Particle[] {
+  const particles: Particle[] = [];
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const startDist = 40 + Math.random() * 50;
+    const speed = -(4 + Math.random() * 6);
+    particles.push({
+      id: Math.random().toString(),
+      pos: pos.add(new Vector2(Math.cos(angle) * startDist, Math.sin(angle) * startDist)),
+      velocity: new Vector2(Math.cos(angle) * speed, Math.sin(angle) * speed),
+      life: 0.35 + Math.random() * 0.25,
+      maxLife: 0.5,
+      color,
+      size: Math.random() * 3 + 2,
+      particleType: 'spark',
+    });
+  }
+  particles.push({
+    id: Math.random().toString(),
+    pos: pos.clone(),
+    velocity: new Vector2(0, 0),
+    life: 0.35,
+    maxLife: 0.35,
+    color,
+    size: 60,
+    particleType: 'ring',
+  });
+  return particles;
+}
+
+export function spawnXpOrb(pos: Vector2, amount = 25): Entity {
+  return {
+    id: Math.random().toString(36).slice(2, 9),
+    type: EntityType.ITEM,
+    pos: pos.clone(),
+    radius: 10,
+    health: 1,
+    maxHealth: 1,
+    speed: 0,
+    velocity: new Vector2(0, 0),
+    color: '#22d3ee',
+    itemType: ItemType.XP,
+    damage: amount,
+  };
 }
 
 export function createImpact(pos: Vector2, color: string, count: number = 3): Particle[] {
@@ -291,17 +381,17 @@ export function updateParticles(particles: Particle[], dt: number = 1) {
   });
 }
 
-export function spawnEnemy(state: GameState): Entity {
+export function spawnEnemy(state: GameState, typeOverride?: number): Entity {
   const worldWidth = state.world.width;
   const worldHeight = state.world.height;
   const playerPos = state.player.pos;
-  const level = state.level;
+  const augmentTier = state.augmentCount;
   const stage = state.stage;
+  const threatMult = 1 + (state.threatLevel / 100) * 0.85;
 
-  // Spawn range increases with maps
   const angle = Math.random() * Math.PI * 2;
-  const distance = 1000 + Math.random() * 300; 
-  
+  const distance = 1000 + Math.random() * 300;
+
   let pos = new Vector2(
     playerPos.x + Math.cos(angle) * distance,
     playerPos.y + Math.sin(angle) * distance
@@ -310,81 +400,102 @@ export function spawnEnemy(state: GameState): Entity {
   pos.x = Math.max(0, Math.min(worldWidth, pos.x));
   pos.y = Math.max(0, Math.min(worldHeight, pos.y));
 
-  // Balanced Difficulty Scaling
-  const skillFactor = Math.sqrt(state.score / 3000 + 1); // Scales faster
-  const healthScale = (1 + (level * 0.15) + (stage * 0.6)) * skillFactor;
-  const speedScale = (1 + (level * 0.04) + (stage * 0.07)) * Math.min(1.8, skillFactor);
-  
-  const isBoss = state.bossActive && state.enemies.filter(e => e.enemyType === EnemyType.BOSS).length === 0;
+  const skillFactor = Math.sqrt(state.score / 3000 + 1);
+  const healthScale = (1 + augmentTier * 0.12 + stage * 0.6) * skillFactor * threatMult;
+  const speedScale =
+    (1 + augmentTier * 0.035 + stage * 0.07) * Math.min(2.1, skillFactor + state.threatLevel / 80);
+
+  const isBoss = state.bossActive && state.enemies.filter((e) => e.enemyType === EnemyType.BOSS).length === 0;
 
   let radius = 12;
   let health = 30 * healthScale;
   let speed = (1.7 + Math.random() * 0.7) * speedScale;
   let color = '#f87171';
   let enemyType = EnemyType.CHASER;
+  let damageResist = 0;
 
   if (isBoss) {
     radius = 110 + stage * 15;
-    health = 4000 + stage * 3000;
+    health = (4000 + stage * 3000 + state.threatLevel * 40) * threatMult;
     speed = 0.8 * speedScale;
     color = '#991b1b';
     enemyType = EnemyType.BOSS;
   } else {
-    const randType = Math.random();
-    if (stage >= 8 && randType < 0.04) {
-      color = '#7c3aed'; // Titan
-      radius = 70;
-      health *= 50;
-      speed *= 0.2;
-      enemyType = EnemyType.TANK;
-    } else if (stage >= 6 && randType < 0.08) {
-      color = '#0ea5e9'; // Phalanx
-      radius = 40;
-      health *= 30;
-      speed *= 0.3;
-      enemyType = EnemyType.PHALANX;
-    } else if (stage >= 5 && randType < 0.12) {
-      color = '#fde68a'; // Wraith
-      radius = 18;
-      health *= 5;
-      speed *= 1.4;
-      enemyType = EnemyType.WRAITH;
-    } else if (stage >= 4 && randType < 0.18) {
-      color = '#fbbf24'; // Elite
-      radius = 35;
-      health *= 15;
-      speed *= 1.1;
-      enemyType = EnemyType.ELITE;
-    } else if (stage >= 3 && randType < 0.28) {
-      color = '#f87171'; // Splinter
-      radius = 25;
-      health *= 8;
-      speed *= 0.8;
-      enemyType = EnemyType.SPLINTER;
-    } else if (stage >= 2 && randType < 0.38) {
-      color = '#f97316'; // Nova
-      radius = 22;
-      health *= 6;
-      speed *= 1.1;
-      enemyType = EnemyType.NOVA;
-    } else if (stage >= 2 && randType < 0.50) {
-      color = '#c084fc'; // Ranged
-      radius = 20;
-      health *= 2.5;
-      speed *= 0.85;
-      enemyType = EnemyType.RANGED;
-    } else if (randType < 0.65) {
-      color = '#fde047'; // Fast
-      radius = 11;
-      health *= 0.4;
-      speed *= 2.3;
-      enemyType = EnemyType.FAST;
-    } else if (randType < 0.8) {
-      color = '#fb923c'; // Swarmer
-      radius = 9;
-      health *= 0.15;
-      speed *= 2.6;
-      enemyType = EnemyType.SWARMER;
+    const typePick = typeOverride ?? pickEnemyTypeForThreat(state, stage);
+    switch (typePick) {
+      case 0:
+        color = '#7c3aed';
+        radius = 70;
+        health *= 50;
+        speed *= 0.2;
+        enemyType = EnemyType.TANK;
+        break;
+      case 1:
+        color = '#0ea5e9';
+        radius = 40;
+        health *= 30;
+        speed *= 0.3;
+        enemyType = EnemyType.PHALANX;
+        break;
+      case 2:
+        color = '#fde68a';
+        radius = 18;
+        health *= 5;
+        speed *= 1.4;
+        enemyType = EnemyType.WRAITH;
+        break;
+      case 3:
+        color = '#fbbf24';
+        radius = 35;
+        health *= 15;
+        speed *= 1.1;
+        enemyType = EnemyType.ELITE;
+        break;
+      case 4:
+        color = '#f87171';
+        radius = 25;
+        health *= 8;
+        speed *= 0.8;
+        enemyType = EnemyType.SPLINTER;
+        break;
+      case 5:
+        color = '#f97316';
+        radius = 22;
+        health *= 6;
+        speed *= 1.1;
+        enemyType = EnemyType.NOVA;
+        break;
+      case 6:
+        color = '#c084fc';
+        radius = 20;
+        health *= 2.5;
+        speed *= 0.85;
+        enemyType = EnemyType.RANGED;
+        break;
+      case 8:
+        color = '#22d3ee';
+        radius = 14;
+        health *= 4;
+        speed *= 1.2;
+        enemyType = EnemyType.CHASER;
+        damageResist = 0.15;
+        break;
+      case 9:
+        color = '#fde047';
+        radius = 11;
+        health *= 0.4;
+        speed *= 2.3;
+        enemyType = EnemyType.FAST;
+        break;
+      case 10:
+        color = '#fb923c';
+        radius = 9;
+        health *= 0.15;
+        speed *= 2.6;
+        enemyType = EnemyType.SWARMER;
+        break;
+      default:
+        break;
     }
   }
 
@@ -398,10 +509,13 @@ export function spawnEnemy(state: GameState): Entity {
     speed,
     velocity: new Vector2(0, 0),
     color,
-    damage: 12 + Math.floor(level / 1.5) + (stage * 5),
+    damage: Math.floor((12 + Math.floor(augmentTier / 1.5) + stage * 5) * threatMult),
     enemyType,
     lastShot: Date.now(),
     aiTimer: 0,
+    behaviorSeed: Math.random(),
+    aiState: 'chase',
+    damageResist,
   };
 }
 
@@ -435,17 +549,13 @@ export function updateProjectiles(projectiles: Entity[], worldWidth: number, wor
 }
 
 export function updateEnemies(state: GameState, dt: number = 1) {
-  const { enemies, player, projectiles, buffs, world } = state;
+  const { enemies, player } = state;
   const playerPos = player.pos;
+  const enemyDt = hasTimeSlowEffect(state) ? dt * 0.3 : dt;
 
-  // Apply time slow logic
-  const enemyDt = buffs.timeSlow > 0 ? dt * 0.3 : dt;
-
-  // Performance Optimization: Spatial Grid for Separation (Pre-built in App.tsx now ideally, but we'll optimize here)
   const gridSize = 120;
   const grid: Record<string, number[]> = {};
-  
-  // High-performance spatial partitioning
+
   for (let i = 0; i < enemies.length; i++) {
     const e = enemies[i];
     const gx = Math.floor(e.pos.x / gridSize);
@@ -455,222 +565,23 @@ export function updateEnemies(state: GameState, dt: number = 1) {
     grid[key].push(i);
   }
 
-  // Global chaos factor for balancing
-  const chaosFactor = Math.max(1, enemies.length / 80);
-
   for (let i = 0; i < enemies.length; i++) {
     const enemy = enemies[i];
     const dx = playerPos.x - enemy.pos.x;
     const dy = playerPos.y - enemy.pos.y;
-    const distSq = dx * dx + dy * dy;
-    const dist = Math.sqrt(distSq);
-    
-    if (dist > 0.1) {
-      let vx = 0;
-      let vy = 0;
-      let steerX = 0;
-      let steerY = 0;
+    const dist = Math.sqrt(dx * dx + dy * dy);
 
-      // --- AI BEHAVIOR BRANCHES ---
-      // Distribute behaviors based on ID with much higher variance
-      const aiSeed = (enemy.id.charCodeAt(enemy.id.length - 1) % 50) / 50;
-      
-      // Much more aggressive flanking angles: +/- ~160 degrees
-      const flankAngle = (aiSeed - 0.5) * Math.PI * 1.7; 
-      
-      const approachType = aiSeed > 0.8 ? 'CIRCLE' : aiSeed > 0.45 ? 'FLANK' : 'DIRECT';
+    if (dist <= 0.1) continue;
 
-      if (enemy.enemyType === EnemyType.RANGED) {
-        // Ranged behavior: strafe aggressively to stay in "sweet spot"
-        const comfortZoneMin = 400;
-        const comfortZoneMax = 600;
-        
-        if (dist > comfortZoneMax) {
-          vx = (dx / dist) * enemy.speed;
-          vy = (dy / dist) * enemy.speed;
-        } else if (dist < comfortZoneMin) {
-          vx = -(dx / dist) * enemy.speed;
-          vy = -(dy / dist) * enemy.speed;
-        } else {
-          // Strafe in comfort zone
-          const strafeDir = new Vector2(-dy / dist, dx / dist).mul(aiSeed > 0.5 ? 1 : -1);
-          vx = strafeDir.x * enemy.speed;
-          vy = strafeDir.y * enemy.speed;
-        }
+    let { vx, vy } = computeEnemyVelocity(enemy, state, enemyDt, dist, dx, dy);
+    const sep = getSeparationForce(enemy, enemies, grid, gridSize, i, enemy.enemyType, state);
+    vx += sep.vx;
+    vy += sep.vy;
 
-        // Weapon: Predictive/Burst
-        const now = Date.now();
-        const fireRate = (buffs.timeSlow > 0 ? 6000 : 3000) * (0.7 + aiSeed * 0.6);
-        if (now - (enemy.lastShot || 0) > fireRate) {
-          enemy.lastShot = now;
-          const angle = Math.atan2(dy, dx) + (Math.random() - 0.5) * 0.12;
-          projectiles.push({
-            id: Math.random().toString(),
-            type: EntityType.PROJECTILE,
-            pos: enemy.pos.clone(),
-            radius: 5,
-            health: 1,
-            maxHealth: 1,
-            speed: 8,
-            velocity: new Vector2(Math.cos(angle) * 8, Math.sin(angle) * 8),
-            color: '#c084fc',
-            ownerId: enemy.id,
-            damage: enemy.damage || 10,
-          });
-        }
-      } else if (enemy.enemyType === EnemyType.BOSS) {
-        // Boss: Direct and menacing
-        vx = (dx / dist) * enemy.speed;
-        vy = (dy / dist) * enemy.speed;
-        
-        const now = Date.now();
-        const baseInterval = (buffs.timeSlow > 0 ? 3000 : 1200);
-        if (now - (enemy.lastShot || 0) > baseInterval) {
-          enemy.lastShot = now;
-          const attackPattern = Math.floor(now / 1500) % 3;
-          const angleToPlayer = Math.atan2(dy, dx);
+    runEnemyAttacks(enemy, state, dist, dx, dy, vx, vy);
 
-          if (attackPattern === 0) {
-            // Nova
-            for (let a = 0; a < 24; a++) {
-              const angle = (a / 24) * Math.PI * 2;
-              projectiles.push({
-                id: Math.random().toString(),
-                type: EntityType.PROJECTILE,
-                pos: enemy.pos.clone(),
-                radius: 14,
-                health: 1,
-                maxHealth: 1,
-                speed: 6,
-                velocity: new Vector2(Math.cos(angle) * 6, Math.sin(angle) * 6),
-                color: '#ef4444',
-                ownerId: enemy.id,
-                damage: enemy.damage || 30,
-              });
-            }
-          } else {
-            // Target Barrage
-            for (let a = -2; a <= 2; a++) {
-              const angle = angleToPlayer + a * 0.15;
-              projectiles.push({
-                id: Math.random().toString(),
-                type: EntityType.PROJECTILE,
-                pos: enemy.pos.clone(),
-                radius: 12,
-                health: 1,
-                maxHealth: 1,
-                speed: 12,
-                velocity: new Vector2(Math.cos(angle) * 12, Math.sin(angle) * 12),
-                color: '#f97316',
-                ownerId: enemy.id,
-                damage: enemy.damage || 20,
-              });
-            }
-          }
-        }
-      } else {
-        // Standard Behavior with high path diversity
-        if (approachType === 'CIRCLE' && dist < 500) {
-          // Circlers strafe around you to create a cloud effect
-          const strafeDir = new Vector2(-dy / dist, dx / dist).mul(aiSeed > 0.9 ? 1 : -1);
-          const approachDir = new Vector2(dx / dist, dy / dist);
-          // Mix strafe and approach so they don't just circle forever without hitting
-          vx = (strafeDir.x * 0.75 + approachDir.x * 0.25) * enemy.speed;
-          vy = (strafeDir.y * 0.75 + approachDir.y * 0.25) * enemy.speed;
-        } else if (approachType === 'FLANK') {
-          // Flankers move in wide arcs
-          const cosF = Math.cos(flankAngle * 0.4);
-          const sinF = Math.sin(flankAngle * 0.4);
-          vx = ((dx * cosF - dy * sinF) / dist) * enemy.speed;
-          vy = ((dx * sinF + dy * cosF) / dist) * enemy.speed;
-        } else {
-          // Direct chasers but with a "wobble" to prevent single-file lines
-          const wobble = Math.sin(Date.now() / 250 + aiSeed * 20) * 0.2;
-          const cosW = Math.cos(wobble);
-          const sinW = Math.sin(wobble);
-          vx = ((dx * cosW - dy * sinW) / dist) * enemy.speed;
-          vy = ((dx * sinW + dy * cosW) / dist) * enemy.speed;
-        }
-
-        // Additional behavior for Elites: periodic burst fire
-        if (enemy.enemyType === EnemyType.ELITE) {
-          const now = Date.now();
-          if (now - (enemy.lastShot || 0) > 2500) {
-            enemy.lastShot = now;
-            const angle = Math.atan2(dy, dx);
-            for (let b = -1; b <= 1; b++) {
-              const bAngle = angle + b * 0.3;
-              projectiles.push({
-                id: Math.random().toString(),
-                type: EntityType.PROJECTILE,
-                pos: enemy.pos.clone(),
-                radius: 6,
-                health: 1,
-                maxHealth: 1,
-                speed: 9,
-                velocity: new Vector2(Math.cos(bAngle) * 9, Math.sin(bAngle) * 9),
-                color: '#fbbf24',
-                ownerId: enemy.id,
-                damage: enemy.damage || 15,
-              });
-            }
-          }
-        }
-      }
-
-      // --- ADVANCED SEPARATION (Spatial Grid) ---
-      // This is crucial to preventing "lines"
-      const gx = Math.floor(enemy.pos.x / gridSize);
-      const gy = Math.floor(enemy.pos.y / gridSize);
-      const sepRadius = (enemy.radius + 20) * 2; 
-      const sepForce = 4.0; // Dynamic and stronger push
-
-      for (let ox = -1; ox <= 1; ox++) {
-        for (let oy = -1; oy <= 1; oy++) {
-          const cell = grid[`${gx + ox},${gy + oy}`];
-          if (!cell) continue;
-          for (const otherIdx of cell) {
-            if (otherIdx === i) continue;
-            const other = enemies[otherIdx];
-            const sdx = enemy.pos.x - other.pos.x;
-            const sdy = enemy.pos.y - other.pos.y;
-            const sdistSq = sdx * sdx + sdy * sdy;
-            const minDist = (enemy.radius + other.radius) * 4.5; // Extreme buffer to force cloud behavior
-            if (sdistSq < minDist * minDist) {
-              const sdist = Math.sqrt(sdistSq) || 0.1;
-              const push = (minDist - sdist) / minDist;
-              steerX += (sdx / sdist) * push * sepForce;
-              steerY += (sdy / sdist) * push * sepForce;
-            }
-          }
-        }
-      }
-
-      // Organic noise for swarm variety
-      const noiseX = Math.sin(Date.now() * 0.002 + i * 500) * 0.8;
-      const noiseY = Math.cos(Date.now() * 0.003 + i * 700) * 0.8;
-
-      vx += steerX + noiseX;
-      vy += steerY + noiseY;
-
-      if (enemy.knockback) {
-        vx += enemy.knockback.x;
-        vy += enemy.knockback.y;
-        enemy.knockback.x *= Math.pow(0.85, enemyDt);
-        enemy.knockback.y *= Math.pow(0.85, enemyDt);
-        if (Math.abs(enemy.knockback.x) < 0.1 && Math.abs(enemy.knockback.y) < 0.1) enemy.knockback = undefined;
-      }
-
-      enemy.pos.x += vx * enemyDt;
-      enemy.pos.y += vy * enemyDt;
-      enemy.velocity.x = vx;
-      enemy.velocity.y = vy;
-      
-      enemy.pos.x = Math.max(0, Math.min(world.width, enemy.pos.x));
-      enemy.pos.y = Math.max(0, Math.min(world.height, enemy.pos.y));
-
-      resolveObstacleCollision(enemy, state.obstacles);
-    }
+    finalizeEnemyMovement(enemy, state, vx, vy, enemyDt, i);
+    resolveObstacleCollision(enemy, state.obstacles);
   }
 }
 
@@ -738,178 +649,6 @@ export function checkProjectileObstacleCollision(p: Entity, obs: Obstacle): bool
   return false;
 }
 
-export const ARTIFACTS: Record<string, Artifact> = {
-  // --- CANNON A (Primary) ---
-  'iron_sights': {
-    id: 'iron_sights',
-    name: 'Iron Sights',
-    description: 'Standard targeting optics. Damage +4',
-    rarity: BuffRarity.COMMON,
-    slot: 'CANNON_A',
-    stats: { damageMod: 4 }
-  },
-  'vanguard_alpha': {
-    id: 'vanguard_alpha',
-    name: 'Vanguard Alpha',
-    description: 'Aggressive prototype. Damage +25%, Crit +5%',
-    rarity: BuffRarity.RARE,
-    slot: 'CANNON_A',
-    stats: { damageMod: 1.25, critMod: 0.05 }
-  },
-  'void_shard': {
-    id: 'void_shard',
-    name: 'Void Shard',
-    description: 'Mysterious artifact. Damage +45%, Speed -10%',
-    rarity: BuffRarity.EPIC,
-    slot: 'CANNON_A',
-    stats: { damageMod: 1.45, speedMod: 0.9 }
-  },
-  'pulse_gatling': {
-    id: 'pulse_gatling',
-    name: 'Pulse Gatling',
-    description: 'High-speed battery. Damage +15, Energy +20',
-    rarity: BuffRarity.RARE,
-    slot: 'CANNON_A',
-    stats: { damageMod: 15, energyMod: 20 }
-  },
-  'eternal_star': {
-    id: 'eternal_star',
-    name: 'Eternal Star',
-    description: 'God-tier relic. Damage +60%, Health +150',
-    rarity: BuffRarity.LEGENDARY,
-    slot: 'CANNON_A',
-    stats: { damageMod: 1.6, healthMod: 150, specialType: 'eternal' }
-  },
-
-  // --- CANNON B (Secondary) ---
-  'backup_cannon': {
-    id: 'backup_cannon',
-    name: 'Backup Cannon',
-    description: 'Emergency yield gun. Damage +3',
-    rarity: BuffRarity.COMMON,
-    slot: 'CANNON_B',
-    stats: { damageMod: 3 }
-  },
-  'plasma_repeater': {
-    id: 'plasma_repeater',
-    name: 'Plasma Repeater',
-    description: 'Cycling plasma rounds. Damage +20%',
-    rarity: BuffRarity.RARE,
-    slot: 'CANNON_B',
-    stats: { damageMod: 1.2 }
-  },
-  'storm_bringer': {
-    id: 'storm_bringer',
-    name: 'Storm Bringer',
-    description: 'Electrical discharge unit. Crit +15%, Damage +10%',
-    rarity: BuffRarity.EPIC,
-    slot: 'CANNON_B',
-    stats: { critMod: 0.15, damageMod: 1.1 }
-  },
-
-  // --- CANNON C (Special / Railgun) ---
-  'heavy_slug': {
-    id: 'heavy_slug',
-    name: 'Heavy Slug',
-    description: 'Manual rail driver. Damage +50',
-    rarity: BuffRarity.COMMON,
-    slot: 'CANNON_C',
-    stats: { damageMod: 50 }
-  },
-  'chrono_piercer': {
-    id: 'chrono_piercer',
-    name: 'Chrono Piercer',
-    description: 'Space-time kinetic driver. Damage +150%, Speed -20%',
-    rarity: BuffRarity.RARE,
-    slot: 'CANNON_C',
-    stats: { damageMod: 2.5, speedMod: 0.8 }
-  },
-  'singularity_cannon': {
-    id: 'singularity_cannon',
-    name: 'Singularity Cannon',
-    description: 'Miniature black hole driver. Damage +400, Crit +10%',
-    rarity: BuffRarity.EPIC,
-    slot: 'CANNON_C',
-    stats: { damageMod: 400, critMod: 0.1 }
-  },
-  'oblivion_ray': {
-    id: 'oblivion_ray',
-    name: 'Oblivion Ray',
-    description: 'Ultimate deletion tool. Damage +300%, Energy +50',
-    rarity: BuffRarity.LEGENDARY,
-    slot: 'CANNON_C',
-    stats: { damageMod: 4.0, energyMod: 50, specialType: 'railgun' }
-  },
-
-  // --- ARMOR ---
-  'basic_hull': {
-    id: 'basic_hull',
-    name: 'Reinforced Hull',
-    description: 'Extra plating. Max Health +30',
-    rarity: BuffRarity.COMMON,
-    slot: 'ARMOR',
-    stats: { healthMod: 30 }
-  },
-  'nanocarbon_shell': {
-    id: 'nanocarbon_shell',
-    name: 'Nanocarbon Shell',
-    description: 'Lightweight protection. Health +50, Speed +5%',
-    rarity: BuffRarity.RARE,
-    slot: 'ARMOR',
-    stats: { healthMod: 50, speedMod: 1.05 }
-  },
-  'titan_plate': {
-    id: 'titan_plate',
-    name: 'Titan Plate',
-    description: 'Heavy duty armor. Max Health +150, Speed -5%',
-    rarity: BuffRarity.EPIC,
-    slot: 'ARMOR',
-    stats: { healthMod: 150, speedMod: 0.95 }
-  },
-  'singularity_core': {
-    id: 'singularity_core',
-    name: 'Singularity Core',
-    description: 'Self-repairing tech. Health +300, Damage +20%',
-    rarity: BuffRarity.LEGENDARY,
-    slot: 'ARMOR',
-    stats: { healthMod: 300, damageMod: 1.2 }
-  },
-
-  // --- MOBILITY ---
-  'basic_thrusters': {
-    id: 'basic_thrusters',
-    name: 'Basic Thrusters',
-    description: 'Standard propulsion. Speed +10%',
-    rarity: BuffRarity.COMMON,
-    slot: 'MOBILITY',
-    stats: { speedMod: 1.1 }
-  },
-  'kinetic_boosters': {
-    id: 'kinetic_boosters',
-    name: 'Kinetic Boosters',
-    description: 'Improved thrust. Speed +15%, Energy +30',
-    rarity: BuffRarity.RARE,
-    slot: 'MOBILITY',
-    stats: { speedMod: 1.15, energyMod: 30 }
-  },
-  'warp_drive': {
-    id: 'warp_drive',
-    name: 'Warp Drive',
-    description: 'Folding engine. Speed +35%, Crit +5%',
-    rarity: BuffRarity.EPIC,
-    slot: 'MOBILITY',
-    stats: { speedMod: 1.35, critMod: 0.05 }
-  },
-  'chronos_drive': {
-    id: 'chronos_drive',
-    name: 'Chronos Drive',
-    description: 'Time-bending engine. Speed +50%, Energy +100',
-    rarity: BuffRarity.LEGENDARY,
-    slot: 'MOBILITY',
-    stats: { speedMod: 1.5, energyMod: 100 }
-  }
-};
-
 export function spawnItem(pos: Vector2): Entity | null {
   const rand = Math.random();
   if (rand > 0.25) return null; 
@@ -917,10 +656,7 @@ export function spawnItem(pos: Vector2): Entity | null {
   let type: ItemType = ItemType.SCORE;
   let color = '#fbbf24'; 
   
-  if (rand < 0.02) { 
-    type = ItemType.ARTIFACT;
-    color = '#f0abfc'; 
-  } else if (rand < 0.08) {
+  if (rand < 0.08) {
     type = ItemType.BOMB;
     color = '#ffffff'; 
   } else if (rand < 0.16) {

@@ -21,6 +21,7 @@ export enum ItemType {
   TIME_SLOW = 'TIME_SLOW',
   PIERCING = 'PIERCING',
   ARTIFACT = 'ARTIFACT',
+  XP = 'XP',
 }
 
 export enum EnemyType {
@@ -57,6 +58,11 @@ export interface Entity {
   lastShot?: number;
   bounceCount?: number;
   life?: number;
+  aiState?: 'chase' | 'strafe' | 'retreat' | 'windup' | 'lunge' | 'blink';
+  behaviorSeed?: number;
+  burnTimer?: number;
+  frostTimer?: number;
+  damageResist?: number;
 }
 
 export interface Particle {
@@ -84,14 +90,21 @@ export enum BuffRarity {
   RARE = 'RARE',
   EPIC = 'EPIC',
   LEGENDARY = 'LEGENDARY',
+  EXCLUSIVE = 'EXCLUSIVE',
 }
 
 export interface PassiveBuff {
   id: string;
   name: string;
   description: string;
+  stackSummary?: string;
   rarity: BuffRarity;
   icon: string;
+  tags?: string[];
+  maxStacks?: number;
+  exclusive?: boolean;
+  wowFactor?: 1 | 2 | 3;
+  threatWeight?: number;
 }
 
 export type ArtifactSlot = 'CANNON_A' | 'CANNON_B' | 'CANNON_C' | 'ARMOR' | 'MOBILITY';
@@ -124,6 +137,12 @@ export interface GameState {
   level: number;
   experience: number;
   nextLevelExp: number;
+  survivalTime: number;
+  threatLevel: number;
+  threatPeak: number;
+  augmentCount: number;
+  augmentPityExclusive: number;
+  runStartTime: number;
   isGameOver: boolean;
   isPaused: boolean;
   wave: number;
@@ -168,7 +187,44 @@ export interface GameState {
   gameMode: 'NORMAL' | 'AIM_TRAINER';
   equippedArtifacts: Record<ArtifactSlot, string | null>;
   activeWeaponSlot: 'CANNON_A' | 'CANNON_B' | 'CANNON_C';
-  cardTimer: number; // Seconds until next card
+  cardTimer: number;
+  permanentOverdrive: boolean;
+  permanentTimeSlow: boolean;
+  permanentRapidFire: boolean;
+  permanentPiercing: boolean;
+  hasLighting: boolean;
+  hasGravityWell: boolean;
+  hasBackshot: boolean;
+  hasSpiralShot: boolean;
+  burnOnCrit: boolean;
+  frostSlowStrength: number;
+  thornsDamage: number;
+  dashIFrames: boolean;
+  dashIFrameTimer: number;
+  comboDamageMult: number;
+  hasEmergencyShield: boolean;
+  emergencyShieldCooldown: number;
+  smartRicochet: boolean;
+  vampiricBurstStacks: number;
+  killCountSinceHeal: number;
+  chainCritBonus: number;
+  pendingCritBonus: number;
+  wideArcStacks: number;
+  dashEnergyDiscount: number;
+  volatileDeath: boolean;
+  hasTimeDilation: boolean;
+  timeDilationCooldown: number;
+  hunterMarkBonus: number;
+  runArtifactUnlocks: number;
+  bulletStormMult: number;
+  hasVoidRift: boolean;
+  voidRiftCooldown: number;
+  killSatelliteCounter: number;
+  hasInfinityPierce: boolean;
+  runArtifactsUnlockedThisRun: string[];
+  pickJuiceTimer: number;
+  beamFlashes: BeamFlash[];
+  nextShotBurns: boolean;
 }
 
 export interface DamageText {
@@ -177,4 +233,13 @@ export interface DamageText {
   text: string;
   life: number;
   color: string;
+}
+
+export interface BeamFlash {
+  id: string;
+  origin: Vector2;
+  end: Vector2;
+  color: string;
+  life: number;
+  maxLife: number;
 }
