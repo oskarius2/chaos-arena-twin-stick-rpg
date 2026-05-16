@@ -1,7 +1,8 @@
-import React from 'react';
+﻿import React from 'react';
 import { motion } from 'motion/react';
 import { Swords, Shield, Zap, Info, Gem, Sparkles, Activity, AlertCircle } from 'lucide-react';
 import { Artifact, ArtifactSlot, BuffRarity } from '../types';
+import { formatArtifactStats, formatArtifactDelta } from '../meta/formatArtifactStats';
 
 interface GearSystemProps {
   equippedIds: Record<ArtifactSlot, string | null>;
@@ -38,7 +39,9 @@ export const GearSystem: React.FC<GearSystemProps> = ({ equippedIds, unlockedArt
   if (!isOpen) return null;
 
   const [selectedSlot, setSelectedSlot] = React.useState<ArtifactSlot>('CANNON_A');
+  const [hoveredId, setHoveredId] = React.useState<string | null>(null);
   const equippedForSlot = unlockedArtifacts.find(a => a.id === equippedIds[selectedSlot]);
+  const hoveredArt = hoveredId ? unlockedArtifacts.find((a) => a.id === hoveredId) : null;
   const artifactsForSlot = unlockedArtifacts.filter(a => a.slot === selectedSlot);
 
   return (
@@ -101,6 +104,8 @@ export const GearSystem: React.FC<GearSystemProps> = ({ equippedIds, unlockedArt
                   key={artifact.id}
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
+                  onMouseEnter={() => setHoveredId(artifact.id)}
+                  onMouseLeave={() => setHoveredId(null)}
                   onClick={() => onEquip(artifact.id)}
                   className={`relative p-4 rounded-3xl border-2 flex flex-col items-start gap-2 text-left transition-all ${
                     equippedIds[selectedSlot] === artifact.id ? 'ring-4 ring-white/20 shadow-2xl' : 'opacity-70 grayscale-[0.3]'
@@ -111,6 +116,13 @@ export const GearSystem: React.FC<GearSystemProps> = ({ equippedIds, unlockedArt
                     <div className="text-sm font-black text-white italic uppercase">{artifact.name}</div>
                   </div>
                   <p className="text-[10px] text-white/50 leading-tight">{artifact.description}</p>
+                  <div className="flex flex-wrap gap-1 mt-1">
+                    {formatArtifactDelta(artifact, equippedForSlot ?? null).map((line) => (
+                      <span key={line} className="text-[9px] font-mono text-cyan-300/90 bg-cyan-500/10 px-1.5 py-0.5 rounded">
+                        {line}
+                      </span>
+                    ))}
+                  </div>
                   {equippedIds[selectedSlot] === artifact.id && (
                     <div className="absolute top-3 right-3 bg-white text-black text-[8px] font-black px-2 py-0.5 rounded-full uppercase">Equipped</div>
                   )}

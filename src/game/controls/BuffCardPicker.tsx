@@ -126,7 +126,7 @@ function BuffCard({
         >
           Equip
         </motion.div>
-      </motion.div>
+      </div>
     </motion.button>
   );
 }
@@ -204,7 +204,7 @@ export const BuffCardPicker: React.FC<BuffCardPickerProps> = ({
           ) : (
             <motion.div layout className="flex w-full max-w-6xl gap-4 md:gap-6 flex-row justify-center items-stretch px-4">
               {buffs.map((buff, i) => (
-                <div key={`${buff.id}-${i}`} className="flex-1 max-w-sm">
+                <motion.div key={`${buff.id}-${i}`} className="flex-1 max-w-sm">
                   <BuffCard buff={buff} passives={passives} onSelect={onSelect} isMobile={false} index={i} />
                 </motion.div>
               ))}

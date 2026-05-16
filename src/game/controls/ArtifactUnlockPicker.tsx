@@ -46,6 +46,8 @@ export const ArtifactUnlockPicker: React.FC<ArtifactUnlockPickerProps> = ({
             <motion.button
               key={art.id}
               type="button"
+              initial={{ scale: 0.85, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
               whileHover={{ scale: 1.03 }}
               whileTap={{ scale: 0.98 }}
               onClick={() => onSelect(art.id)}

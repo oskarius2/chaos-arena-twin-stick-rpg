@@ -200,6 +200,24 @@ export function render(ctx: CanvasRenderingContext2D, state: GameState, width: n
     const size = item.radius;
 
     // Rarity determination
+    if (item.itemType === ItemType.XP) {
+      ctx.save();
+      ctx.translate(drawX, drawY + bounce);
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = '#22d3ee';
+      ctx.fillStyle = '#22d3ee';
+      ctx.beginPath();
+      ctx.arc(0, 0, size * 0.9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = '#ffffff';
+      ctx.beginPath();
+      ctx.arc(0, 0, size * 0.35, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      ctx.shadowBlur = 0;
+      return;
+    }
+
     const isLegendary = [ItemType.MULTISHOT, ItemType.OVERDRIVE, ItemType.SHIELD, ItemType.RAPID_FIRE, ItemType.TIME_SLOW, ItemType.PIERCING].includes(item.itemType!);
     const isRare = [ItemType.BOMB, ItemType.MAGNET, ItemType.SCORE_MULTIPLIER].includes(item.itemType!);
 
@@ -329,6 +347,34 @@ export function render(ctx: CanvasRenderingContext2D, state: GameState, width: n
   });
   ctx.restore();
 
+  // Beam flashes (CANNON_C)
+  state.beamFlashes?.forEach((beam) => {
+    const ox = beam.origin.x - camera.x;
+    const oy = beam.origin.y - camera.y;
+    const ex = beam.end.x - camera.x;
+    const ey = beam.end.y - camera.y;
+    const alpha = beam.life / beam.maxLife;
+    ctx.save();
+    ctx.globalAlpha = alpha * 0.85;
+    ctx.strokeStyle = beam.color;
+    ctx.lineWidth = 28;
+    ctx.shadowBlur = 40;
+    ctx.shadowColor = beam.color;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 6;
+    ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    ctx.moveTo(ox, oy);
+    ctx.lineTo(ex, ey);
+    ctx.stroke();
+    ctx.restore();
+    ctx.shadowBlur = 0;
+  });
+
   // Render Projectiles (with culling)
   state.projectiles.forEach(p => {
     const drawX = p.pos.x - camera.x;
@@ -336,34 +382,27 @@ export function render(ctx: CanvasRenderingContext2D, state: GameState, width: n
 
     if (drawX < -200 || drawX > width + 200 || drawY < -200 || drawY > height + 200) return;
 
-    // Bullet trail
-    const velLen = p.velocity.magnitude();
-    const isBeam = p.radius > 20; // Laser beam signature
-    
+    const velLen = Math.max(p.velocity.magnitude(), 0.001);
+    const isRocket = p.itemType === ItemType.BOMB;
+    const trailLen = isRocket ? 28 : p.radius > 8 ? 20 : 14;
+
     ctx.save();
     ctx.strokeStyle = p.color || '#fef08a';
-    ctx.globalAlpha = isBeam ? 0.6 : 0.3;
-    ctx.lineWidth = isBeam ? p.radius * 2 : p.radius * 1.5;
+    ctx.globalAlpha = isRocket ? 0.45 : 0.3;
+    ctx.lineWidth = isRocket ? p.radius * 2.2 : p.radius * 1.5;
     ctx.beginPath();
     ctx.moveTo(drawX, drawY);
-    ctx.lineTo(drawX - (p.velocity.x / velLen) * (isBeam ? 300 : 20), drawY - (p.velocity.y / velLen) * (isBeam ? 300 : 20));
+    ctx.lineTo(
+      drawX - (p.velocity.x / velLen) * trailLen,
+      drawY - (p.velocity.y / velLen) * trailLen
+    );
     ctx.stroke();
-    
-    if (isBeam) {
-        // Core glow for beam
-        ctx.strokeStyle = '#ffffff';
-        ctx.lineWidth = p.radius * 0.4;
-        ctx.beginPath();
-        ctx.moveTo(drawX, drawY);
-        ctx.lineTo(drawX - (p.velocity.x / velLen) * 300, drawY - (p.velocity.y / velLen) * 300);
-        ctx.stroke();
-    }
     ctx.restore();
 
     ctx.globalAlpha = 1.0;
 
     ctx.fillStyle = p.color || '#ffffff';
-    ctx.shadowBlur = isBeam ? 60 : 15;
+    ctx.shadowBlur = isRocket ? 25 : 15;
     ctx.shadowColor = p.color || '#fef08a';
     ctx.beginPath();
     ctx.arc(drawX, drawY, p.radius, 0, Math.PI * 2);

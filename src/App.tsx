@@ -7,15 +7,16 @@ import { GearSystem } from './game/controls/GearSystem';
 import { BuffCardPicker } from './game/controls/BuffCardPicker';
 import { ArtifactUnlockPicker } from './game/controls/ArtifactUnlockPicker';
 import { ArtifactInventory } from './game/controls/ArtifactInventory';
-import { detectMobileViewport } from './game/controls/mobileLayout';
+import { detectMobileViewport, isCompactGameHud, isPortraitViewport } from './game/controls/mobileLayout';
+import { WeaponDock } from './game/controls/WeaponDock';
 import { computeThreatLevel } from './game/balance/threat';
 import { playSfx, loadSfxMuted, setSfxMuted, setSfxVolume, getSfxVolume, resumeAudio } from './game/audio/sfx';
-import { startMusic, stopMusic, duckMusic, loadMusicSettings, setMusicMuted, setMusicVolume, getMusicMuted } from './game/audio/music';
+import { startMusic, stopMusic, duckMusic, loadMusicSettings, setMusicMuted, setMusicVolume } from './game/audio/music';
 import { computeBeam, createBeamFlash } from './game/combat/beam';
 import { applyBeamHit } from './game/combat/beamHit';
 import { spawnDamageNumber } from './game/juice/damageNumbers';
 import { triggerHitFeedback, shootSfxForSlot, isBossHit } from './game/juice/hitFeedback';
-import { getActiveSynergies } from './game/buffs/synergies';
+import { getActiveSynergies, countTag } from './game/buffs/synergies';
 import { SynergyBar } from './game/controls/SynergyBar';
 import { RunSummary } from './game/controls/RunSummary';
 import { PASSIVE_BUFFS } from './game/content/buffs';
@@ -107,6 +108,8 @@ export default function App() {
   const [artifactUnlockChoices, setArtifactUnlockChoices] = useState<Artifact[]>([]);
   const [showArtifactUnlock, setShowArtifactUnlock] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
+  const [isPortrait, setIsPortrait] = useState(false);
+  const [compactHud, setCompactHud] = useState(false);
   const [isInventoryOpen, setIsInventoryOpen] = useState(false);
   const [newUnlockIds, setNewUnlockIds] = useState<string[]>([]);
 
@@ -141,8 +144,13 @@ export default function App() {
     setMusicMutedState(localStorage.getItem('musicMuted') === '1');
     setSfxVol(getSfxVolume());
     const handleResize = () => {
-      setDimensions({ width: window.innerWidth, height: window.innerHeight });
-      setIsMobile(detectMobileViewport());
+      const w = window.innerWidth;
+      const h = window.innerHeight;
+      setDimensions({ width: w, height: h });
+      const mobile = detectMobileViewport();
+      setIsMobile(mobile);
+      setIsPortrait(isPortraitViewport());
+      setCompactHud(isCompactGameHud());
     };
     handleResize();
     window.addEventListener('resize', handleResize);
@@ -445,10 +453,15 @@ export default function App() {
       if (next.cardTimer <= 0) {
         next.cardTimer = getCardIntervalSeconds(next.stage);
         openBuffPicker(next);
+        playSfx('levelUp');
         next.particles.push(...createExplosion(player.pos, '#60a5fa', 80));
         next.screenshake = 25;
         syncUi();
       }
+
+      next.beamFlashes = next.beamFlashes
+        .map((b) => ({ ...b, life: b.life - dt * 0.02 }))
+        .filter((b) => b.life > 0);
 
       if (next.dashIFrameTimer > 0) next.dashIFrameTimer -= dt;
 
@@ -484,8 +497,8 @@ export default function App() {
 
       if (next.screenFlash > 0) next.screenFlash -= dt;
       
-      // Passive Magnet Effect
       const effectiveMagnetRange = next.buffs.magnet > 0 ? 800 : next.magnetRange;
+      const xpMagnetRange = 120;
 
       // Passive Regen
       if (next.regen > 0 && player.health < player.maxHealth) {
@@ -612,7 +625,11 @@ export default function App() {
       
       if (controls.current.isFiring && currentTime - lastFireTime.current > fireInterval) {
         lastFireTime.current = currentTime;
-        
+
+        if (countTag(next, 'damage') >= 2 && countTag(next, 'fire') >= 1) {
+          next.nextShotBurns = true;
+        }
+
         let numProjectiles = next.multiShot || 1;
         const spread = Math.min(Math.PI / 4, 0.1 * numProjectiles); // Dynamic spread
         
@@ -684,26 +701,47 @@ export default function App() {
 
           const finalDamage = Math.floor(baseDmg * damageMult);
 
-          // For Cannon C, we spawn multiple projectiles in a line to simulate a beam
           if (next.activeWeaponSlot === 'CANNON_C') {
-             for (let b = 0; b < 25; b++) {
-               const beamPos = player.pos.add(new Vector2(Math.cos(finalAngle), Math.sin(finalAngle)).mul(b * 35));
-               next.projectiles.push({
-                id: Math.random().toString(),
-                type: EntityType.PROJECTILE,
-                pos: beamPos,
-                radius: pRadius,
-                health: 1,
-                maxHealth: 1,
-                speed: projectileSpeed,
-                velocity: new Vector2(velX, velY).mul(0.1), // Slow moving part of the static beam beam
-                color: pColor,
-                ownerId: 'player',
-                damage: finalDamage,
-                bounceCount: pPiercing,
-                life: 0.15, // Short flash
-              });
-             }
+            const unlimitedPierce =
+              hasPermanentPiercing(next) || next.hasInfinityPierce || next.buffs.piercing > 0;
+            const beam = computeBeam(
+              player.pos,
+              finalAngle,
+              next.enemies,
+              next.obstacles,
+              unlimitedPierce,
+              unlimitedPierce ? 99 : 8
+            );
+            next.beamFlashes.push(
+              createBeamFlash(player.pos, beam.end, pColor)
+            );
+            const beamCtx = {
+              next,
+              player,
+              dt,
+              damage: finalDamage,
+              isCrit,
+              onBossKill: () => {
+                if (next.runArtifactUnlocks < 2) {
+                  const choices = pickArtifactUnlockChoices(unlockedArtifactIds, 2);
+                  if (choices.length > 0) {
+                    setArtifactUnlockChoices(choices);
+                    setShowArtifactUnlock(true);
+                    next.isPaused = true;
+                    playSfx('boss');
+                  }
+                }
+              },
+            };
+            for (const hit of beam.hits) {
+              if (hit.enemy.health > 0) applyBeamHit(beamCtx, hit.enemy);
+            }
+            if (next.nextShotBurns) {
+              for (const hit of beam.hits) {
+                if (hit.enemy.health > 0) hit.enemy.burnTimer = Math.max(hit.enemy.burnTimer || 0, 90);
+              }
+              next.nextShotBurns = false;
+            }
           } else {
             next.projectiles.push({
               id: Math.random().toString(),
@@ -723,6 +761,7 @@ export default function App() {
           }
         }
         
+        shootSfxForSlot(next.activeWeaponSlot);
         const muzzlePos = player.pos.add(aimDir.normalize().mul(player.radius));
         if (next.activeWeaponSlot === 'CANNON_C') {
           next.particles.push(...createExplosion(muzzlePos, '#60a5fa', 15, 2));
@@ -880,14 +919,16 @@ export default function App() {
               
               if (player.health <= 0) {
                 next.isGameOver = true;
+                playSfx('gameOver');
+                stopMusic();
                 next.particles.push(...createExplosion(player.pos, player.color, 50));
                 next.particles.push(...createExplosion(player.pos, '#ffffff', 20));
                 next.screenshake = 20;
                 syncUi();
               }
             } else {
-              // Shield absorbed
-              next.particles.push(...createExplosion(p.pos, '#34d399', 3));
+              next.particles.push(...createImpact(p.pos, '#60a5fa', 8));
+              triggerHitFeedback(next, 'shield');
             }
             p.health = 0;
             continue;
@@ -1010,36 +1051,35 @@ export default function App() {
                     p.health = 0;
                   }
                   
-                  if (isCrit) {
-                    next.hitStop = Math.min(next.hitStop + 1.5, 5); // Capped hitStop accumulation
-                  } else if (e.enemyType === EnemyType.BOSS) {
-                    next.hitStop = Math.min(next.hitStop + 0.8, 3);
+                  if (next.burnOnCrit && isCrit) {
+                    e.burnTimer = Math.max(e.burnTimer || 0, 120);
                   }
-                  
-                  const kbForce = Math.min((damage / e.maxHealth) * 30 + 2, 10);
-                  const pNorm = p.velocity.normalize();
-                  e.knockback = new Vector2(pNorm.x * kbForce, pNorm.y * kbForce);
-                  
-                  if (isCrit) {
-                    next.screenshake = Math.min(next.screenshake + 5, 20);
-                    next.particles.push(...createExplosion(e.pos, '#ffffff', 5, 2));
-                  } else {
-                    next.screenshake = Math.min(next.screenshake + 1.5, 10);
+                  if (next.nextShotBurns) {
+                    e.burnTimer = Math.max(e.burnTimer || 0, 90);
+                    next.nextShotBurns = false;
                   }
 
-                  // Optimization: Throttle visual feedback when chaos is high
-                  const chaosFactor = Math.max(1, next.enemies.length / 50);
-                  const shouldSpawnText = Math.random() > (1 - 1/chaosFactor);
-                  
-                  if (shouldSpawnText) {
-                    next.damageTexts.push({
-                      id: Math.random().toString(),
-                      pos: e.pos.clone(),
-                      text: (isCrit ? 'CRIT! ' : '') + damage.toString(),
-                      life: 0.8, // Shorter life for performance
-                      color: isCrit ? '#fde047' : (e.health <= 0 ? '#ef4444' : '#ffffff')
-                    });
+                  if (isCrit) triggerHitFeedback(next, 'crit');
+                  else if (isBossHit(e.enemyType)) triggerHitFeedback(next, 'boss');
+                  else triggerHitFeedback(next, 'normal');
+
+                  const kbForce = Math.min((damage / e.maxHealth) * 30 + 2, 10);
+                  const pNorm = p.velocity.magnitude() > 0.01 ? p.velocity.normalize() : new Vector2(1, 0);
+                  e.knockback = new Vector2(pNorm.x * kbForce, pNorm.y * kbForce);
+
+                  if (isCrit) {
+                    next.particles.push(...createExplosion(e.pos, '#ffffff', 5, 2));
                   }
+
+                  const chaosFactor = Math.max(1, next.enemies.length / 50);
+                  spawnDamageNumber(
+                    next.damageTexts,
+                    e.pos.clone(),
+                    damage,
+                    isCrit ? '#fde047' : e.health <= 0 ? '#ef4444' : '#ffffff',
+                    isCrit,
+                    chaosFactor
+                  );
 
                   if (Math.random() > (1 - 0.5/chaosFactor)) {
                     next.particles.push(...createImpact(p.pos, p.color || '#ffffff', isCrit ? 6 : 3));
@@ -1085,9 +1125,11 @@ export default function App() {
                       }
                     }
                     
-                    // Throttle death explosions
+                    const rarityColor = e.enemyType === EnemyType.BOSS ? '#fbbf24' : e.color;
+                    next.particles.push(...createImplosion(e.pos, rarityColor, Math.max(5, 12 / chaosFactor)));
                     const explCount = e.enemyType === EnemyType.BOSS ? 100 : (20 / chaosFactor);
                     next.particles.push(...createExplosion(e.pos, e.color, Math.max(5, explCount), 1.5));
+                    next.items.push(spawnXpOrb(e.pos, 25));
                     
                     // Reduced screenshake in high chaos
                     const shakeMult = 1 / Math.sqrt(chaosFactor);
@@ -1184,19 +1226,29 @@ export default function App() {
 
       // Item Collection
       next.items = next.items.filter(item => {
-        // Magnet effect
         const d = player.pos.sub(item.pos);
         const dist = d.magnitude();
-        if (dist < effectiveMagnetRange) {
-          const mult = next.buffs.magnet > 0 ? 12 : 6;
+        const magnetR = item.itemType === ItemType.XP ? xpMagnetRange : effectiveMagnetRange;
+        if (dist < magnetR) {
+          const mult =
+            item.itemType === ItemType.XP
+              ? 14
+              : next.buffs.magnet > 0
+                ? 12
+                : 6;
           item.pos = item.pos.add(d.normalize().mul(mult * dt));
         }
 
         if (checkCollision(player, item)) {
-          if (item.itemType === ItemType.HEALTH) {
+          if (item.itemType === ItemType.XP) {
+            next.experience += item.damage ?? 25;
+            playSfx('pickup');
+          } else if (item.itemType === ItemType.HEALTH) {
             player.health = Math.min(player.maxHealth, player.health + 100);
+            playSfx('pickup');
           } else if (item.itemType === ItemType.ENERGY) {
             next.energy = next.maxEnergy;
+            playSfx('pickup');
           } else if (item.itemType === ItemType.BOMB) {
             next.enemies.forEach(e => {
               e.health = 0;
@@ -1229,12 +1281,14 @@ export default function App() {
             player.hitTimer = 3;
             next.screenshake = Math.min(next.screenshake + 0.5 * dt, 8);
           } else {
-            // Deflect effect
-            next.particles.push(...createExplosion(player.pos, '#34d399', 1));
+            next.particles.push(...createImpact(player.pos, '#60a5fa', 4));
+            triggerHitFeedback(next, 'shield');
           }
           
           if (player.health <= 0) {
             next.isGameOver = true;
+            playSfx('gameOver');
+            stopMusic();
             next.particles.push(...createExplosion(player.pos, player.color, 50));
             next.particles.push(...createExplosion(player.pos, '#ffffff', 20));
             next.screenshake = 20;
@@ -1384,16 +1438,47 @@ export default function App() {
             }}
             randomBuffs={currentBuffs}
             cardTimer={uiState.cardTimer}
+            cardInterval={getCardIntervalSeconds(uiState.stage)}
             activeWeaponSlot={uiState.activeWeaponSlot}
             equippedArtifacts={uiState.equippedArtifacts}
             isMobile={isMobile}
+            compactHud={compactHud}
           />
+          {gameStateRef.current && (
+            <SynergyBar lines={getActiveSynergies(gameStateRef.current)} compact={compactHud} />
+          )}
+          {compactHud && (
+            <motion.div
+              className="absolute left-1/2 -translate-x-1/2 z-40 pointer-events-none"
+              style={{ bottom: 'max(6.25rem, calc(env(safe-area-inset-bottom) + 5.5rem))' }}
+            >
+              <WeaponDock
+                activeSlot={uiState.activeWeaponSlot}
+                portrait={isPortrait}
+                onSwitch={(slot) => {
+                  const next = gameStateRef.current;
+                  if (next) {
+                    next.activeWeaponSlot = slot;
+                    syncUi();
+                  }
+                }}
+              />
+            </motion.div>
+          )}
           {/* Buff Bar */}
-          <div className="absolute top-24 left-6 flex flex-col gap-2">
+          <div
+            className={
+              compactHud
+                ? 'absolute top-[4.5rem] right-2 flex flex-row flex-wrap gap-1 max-w-[48%] justify-end z-10'
+                : 'absolute top-24 left-6 flex flex-col gap-2'
+            }
+          >
             {uiState?.buffs.shield > 0 && (
-              <motion.div initial={{ x: -20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} className="flex items-center gap-2 bg-emerald-500/20 backdrop-blur-md px-3 py-1 rounded-full border border-emerald-500/50">
-                <Shield size={16} className="text-emerald-400" />
-                <span className="text-xs font-bold text-emerald-400">SHIELD {Math.ceil(uiState.buffs.shield / 60)}s</span>
+              <motion.div initial={{ x: -20, opacity: 0 }} animate={{ x: 0, opacity: 1 }} className={`flex items-center gap-1.5 bg-emerald-500/20 backdrop-blur-md rounded-full border border-emerald-500/50 ${compactHud ? 'px-2 py-0.5' : 'px-3 py-1'}`}>
+                <Shield size={compactHud ? 12 : 16} className="text-emerald-400 shrink-0" />
+                <span className={`font-bold text-emerald-400 ${compactHud ? 'text-[9px]' : 'text-xs'}`}>
+                  {compactHud ? `S ${Math.ceil(uiState.buffs.shield / 60)}` : `SHIELD ${Math.ceil(uiState.buffs.shield / 60)}s`}
+                </span>
               </motion.div>
             )}
             {uiState?.buffs.overdrive > 0 && (
@@ -1434,11 +1519,32 @@ export default function App() {
             )}
           </div>
 
-          <div className="absolute bottom-6 left-6 md:bottom-10 md:left-10 flex flex-col items-center gap-4">
-            <Joystick size={isMobile ? 92 : 128} label="move" onMove={(dir) => { controls.current.move = dir; }} onEnd={() => { controls.current.move = { x: 0, y: 0 }; }} />
-          </div>
-          <div className="absolute bottom-6 right-6 md:bottom-10 md:right-10 flex flex-col items-center gap-4">
-            <div className="relative mb-2">
+          <motion.div
+            className={`absolute flex flex-col items-center gap-3 pointer-events-none ${
+              compactHud
+                ? 'left-[max(0.5rem,env(safe-area-inset-left))] bottom-[max(0.75rem,env(safe-area-inset-bottom))]'
+                : 'bottom-6 left-6 md:bottom-10 md:left-10'
+            }`}
+          >
+            <Joystick
+              size={compactHud ? 76 : isMobile ? 92 : 128}
+              label="move"
+              onMove={(dir) => {
+                controls.current.move = dir;
+              }}
+              onEnd={() => {
+                controls.current.move = { x: 0, y: 0 };
+              }}
+            />
+          </motion.div>
+          <motion.div
+            className={`absolute flex flex-col items-center gap-2 pointer-events-none ${
+              compactHud
+                ? 'right-[max(0.5rem,env(safe-area-inset-right))] bottom-[max(0.75rem,env(safe-area-inset-bottom))]'
+                : 'bottom-6 right-6 md:bottom-10 md:right-10'
+            }`}
+          >
+            <motion.div className="relative mb-1 pointer-events-auto">
               {uiState && uiState.energy < 30 && (
                 <div className="absolute inset-0 bg-red-500/20 rounded-full animate-pulse pointer-events-none" />
               )}
@@ -1448,17 +1554,31 @@ export default function App() {
                   e.stopPropagation();
                   controls.current.wantDash = true; 
                 }}
-                className={`w-14 h-14 md:w-16 md:h-16 rounded-full border-2 flex items-center justify-center text-white pointer-events-auto transition-all duration-300 shadow-lg ${
-                  uiState && uiState.energy >= 30 
-                    ? 'bg-amber-500 border-white/20 shadow-amber-500/40' 
+                className={`rounded-full border-2 flex items-center justify-center text-white transition-all duration-300 shadow-lg touch-manipulation ${
+                  compactHud ? 'min-h-12 min-w-12' : 'w-14 h-14 md:w-16 md:h-16'
+                } ${
+                  uiState && uiState.energy >= 30
+                    ? 'bg-amber-500 border-white/20 shadow-amber-500/40'
                     : 'bg-gray-800 border-white/5 opacity-50 grayscale'
                 }`}
+                aria-label="Dash"
               >
-                <Zap size={32} fill={uiState && uiState.energy >= 30 ? "white" : "rgba(255,255,255,0.2)"} />
+                <Zap size={compactHud ? 24 : 32} fill={uiState && uiState.energy >= 30 ? 'white' : 'rgba(255,255,255,0.2)'} />
               </motion.button>
-            </div>
-            <Joystick size={isMobile ? 92 : 128} label="aim" color="bg-red-500/10" onMove={(dir) => { controls.current.aim = dir; controls.current.isFiring = true; }} onEnd={() => { controls.current.isFiring = false; }} />
-          </div>
+            </motion.div>
+            <Joystick
+              size={compactHud ? 76 : isMobile ? 92 : 128}
+              label="aim"
+              color="bg-red-500/10"
+              onMove={(dir) => {
+                controls.current.aim = dir;
+                controls.current.isFiring = true;
+              }}
+              onEnd={() => {
+                controls.current.isFiring = false;
+              }}
+            />
+          </motion.div>
         </motion.div>
       )}
 
@@ -1518,15 +1638,28 @@ export default function App() {
               <p className="text-blue-400 font-mono text-sm tracking-widest mt-2 uppercase">Neural Link Suspended</p>
             </div>
             
-            <div className="flex flex-col gap-4 w-72">
+            <motion.div className="flex flex-col gap-4 w-72 pointer-events-auto">
+              <label className="text-white/50 text-[10px] uppercase font-bold tracking-widest">SFX</label>
+              <input type="range" min={0} max={100} value={Math.round(sfxVol * 100)} onChange={(e) => { const v = Number(e.target.value) / 100; setSfxVol(v); setSfxVolume(v); }} className="w-full accent-blue-500" />
+              <label className="flex items-center gap-2 text-white text-sm">
+                <input type="checkbox" checked={sfxMuted} onChange={(e) => { setSfxMutedState(e.target.checked); setSfxMuted(e.target.checked); }} />
+                Mute SFX
+              </label>
+              <label className="text-white/50 text-[10px] uppercase font-bold tracking-widest mt-2">Music</label>
+              <input type="range" min={0} max={100} value={Math.round(musicVol * 100)} onChange={(e) => { const v = Number(e.target.value) / 100; setMusicVol(v); setMusicVolume(v); }} className="w-full accent-fuchsia-500" />
+              <label className="flex items-center gap-2 text-white text-sm">
+                <input type="checkbox" checked={musicMuted} onChange={(e) => { setMusicMutedState(e.target.checked); setMusicMuted(e.target.checked); if (e.target.checked) stopMusic(); else { resumeAudio(); startMusic(); } }} />
+                Mute music
+              </label>
               <button 
                 onClick={togglePause}
-                className="bg-blue-600 hover:bg-blue-500 text-white font-black py-4 rounded-2xl flex items-center justify-center gap-3 shadow-lg shadow-blue-500/30 transition-all pointer-events-auto"
+                className="bg-blue-600 hover:bg-blue-500 text-white font-black py-4 rounded-2xl flex items-center justify-center gap-3 shadow-lg shadow-blue-500/30 transition-all mt-2"
               >
                 <Play size={24} fill="white" /> RESUME MISSION
               </button>
               <button 
                 onClick={() => {
+                  stopMusic();
                   gameStateRef.current = null;
                   setScreen('MENU');
                   setIsPauseMenuOpen(false);
@@ -1535,54 +1668,25 @@ export default function App() {
               >
                 <RotateCcw size={24} /> ABORT TO MENU
               </button>
-            </div>
+            </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      <AnimatePresence>
-        {uiState?.isGameOver && (
-          <motion.div 
-            key="game-over-screen"
-            initial={{ opacity: 0 }} 
-            animate={{ opacity: 1 }} 
-            className="absolute inset-0 z-[100] bg-red-950/90 backdrop-blur-xl flex flex-col items-center justify-center p-6 pt-[max(1rem,env(safe-area-inset-top))] pb-[max(1rem,env(safe-area-inset-bottom))]"
-          >
-            <h2 className="text-5xl md:text-8xl font-black text-white italic tracking-tighter uppercase mb-6">DEFEATED</h2>
-            <div className="bg-black/40 border border-white/10 p-8 rounded-3xl text-center mb-8 min-w-[300px]">
-              <div className="text-5xl font-black text-white mb-2">{uiState.score.toLocaleString()}</div>
-              <div className="text-white/40 text-xs uppercase font-bold tracking-widest mb-4">Final Score</div>
-              <div className="grid grid-cols-2 gap-3 text-left text-sm mt-4">
-                <div className="bg-white/5 p-3 rounded-xl">
-                  <div className="text-white/40 text-[10px] uppercase font-bold">Survived</div>
-                  <div className="text-white font-mono font-bold">
-                    {Math.floor((gameStateRef.current?.survivalTime ?? 0) / 60)}:
-                    {String(Math.floor((gameStateRef.current?.survivalTime ?? 0) % 60)).padStart(2, '0')}
-                  </div>
-                </div>
-                <div className="bg-white/5 p-3 rounded-xl">
-                  <div className="text-white/40 text-[10px] uppercase font-bold">Peak Heat</div>
-                  <div className="text-rose-400 font-black">{gameStateRef.current?.threatPeak ?? 0}%</div>
-                </div>
-                <div className="bg-white/5 p-3 rounded-xl">
-                  <div className="text-white/40 text-[10px] uppercase font-bold">Sector</div>
-                  <div className="text-amber-400 font-black">{uiState.stage}</div>
-                </div>
-                <div className="bg-white/5 p-3 rounded-xl">
-                  <div className="text-white/40 text-[10px] uppercase font-bold">Augments</div>
-                  <div className="text-cyan-400 font-black">{gameStateRef.current?.augmentCount ?? 0}</div>
-                </div>
-              </div>
-            </motion.div>
-            <button onClick={() => { 
-                gameStateRef.current = null;
-                startGame();
-              }} className="min-h-14 bg-white hover:bg-gray-200 transition-colors text-black font-black py-4 px-12 rounded-2xl flex items-center justify-center gap-3 pointer-events-auto">
-              <RotateCcw size={24} /> RESTART RUN
-            </button>
-          </motion.div>
-        )}
-      </AnimatePresence>
+      {uiState?.isGameOver && gameStateRef.current ? (
+        <RunSummary
+          state={gameStateRef.current}
+          unlockedCount={unlockedArtifactIds.length}
+          totalArtifacts={Object.keys(ARTIFACTS).length}
+          lockedIds={Object.keys(ARTIFACTS).filter((id) => !unlockedArtifactIds.includes(id))}
+          victory={uiState.stage > 25}
+          onRestart={() => {
+            gameStateRef.current = null;
+            startGame();
+          }}
+          onVault={() => setIsInventoryOpen(true)}
+        />
+      ) : null}
     </div>
   );
 }
